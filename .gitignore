@@ -1,0 +1,25 @@
+# Prototype de référence fourni par Sarah (non versionné, gardé intact en local)
+P10_DSML/
+
+# Secrets
+.env
+*.env
+!.env.example
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Index vectoriel généré (régénérable via scripts/index.py)
+data/vector_db/
