@@ -1,0 +1,192 @@
+[
+  {
+    "id": "S1",
+    "categorie": "simple",
+    "modalite": "excel",
+    "expected_behavior": "answer",
+    "evaluation_focus": "retrieval_local",
+    "question": "Combien de points Nikola Jokić a-t-il marqués au total cette saison ?",
+    "reference_answer": "2072 points (total de saison, colonne PTS).",
+    "source": "Données NBA"
+  },
+  {
+    "id": "S2",
+    "categorie": "simple",
+    "modalite": "excel",
+    "expected_behavior": "answer",
+    "evaluation_focus": "retrieval_local",
+    "question": "Quel est le pourcentage de réussite aux lancers francs de Stephen Curry ?",
+    "reference_answer": "93,3% (colonne FT%).",
+    "source": "Données NBA"
+  },
+  {
+    "id": "S3",
+    "categorie": "simple",
+    "modalite": "excel",
+    "expected_behavior": "answer",
+    "evaluation_focus": "retrieval_local",
+    "question": "Combien de matchs Shai Gilgeous-Alexander a-t-il joués cette saison ?",
+    "reference_answer": "76 matchs (colonne GP).",
+    "source": "Données NBA"
+  },
+  {
+    "id": "S4",
+    "categorie": "simple",
+    "modalite": "pdf_reddit",
+    "expected_behavior": "answer",
+    "evaluation_focus": "retrieval_local",
+    "question": "Quels deux joueurs du Magic l'auteur du post cite-t-il comme son \"young wing duo\" préféré ?",
+    "reference_answer": "Paolo (Banchero) et Franz (Wagner).",
+    "source": "Reddit 1.pdf — post initial"
+  },
+  {
+    "id": "S5",
+    "categorie": "simple",
+    "modalite": "pdf_reddit",
+    "expected_behavior": "answer",
+    "evaluation_focus": "retrieval_local",
+    "question": "Quelle équipe est citée comme l'exemple le plus connu d'un champion NBA n'ayant jamais eu l'avantage du terrain, même en Finales ?",
+    "reference_answer": "Les Houston Rockets de 1995.",
+    "source": "Reddit 4.pdf"
+  },
+  {
+    "id": "S6",
+    "categorie": "simple",
+    "modalite": "pdf_reddit",
+    "expected_behavior": "answer",
+    "evaluation_focus": "retrieval_local_imbrique",
+    "question": "Dans les réponses au commentaire à 356 upvotes affirmant qu'une série Pacers–Thunder serait \"great and toxic\", quel joueur des Pacers est cité (2 niveaux plus bas, 61 upvotes) comme l'un des plus gros trash-talkers de la ligue ?",
+    "reference_answer": "Tyrese Haliburton (le commentaire à 356 upvotes lui-même ne nomme personne — l'attribution vient d'une réponse imbriquée à 61 upvotes).",
+    "source": "Reddit 2.pdf, p.11"
+  },
+  {
+    "id": "C1",
+    "categorie": "complexe",
+    "modalite": "excel",
+    "sous_type": "agregation_exhaustive",
+    "expected_behavior": "answer",
+    "evaluation_focus": "filter_then_global_max",
+    "question": "Quel joueur a le meilleur pourcentage de réussite à 3 points (3P%) parmi ceux ayant tenté plus de 300 tirs à 3 points cette saison ?",
+    "reference_answer": "Zach LaVine, 44,6% sur 533 tentatives (3PA).",
+    "source": "Données NBA",
+    "note": "Filtre + maximum sur 569 lignes réparties sur 143 chunks : un retrieval top-k n'a aucune garantie de ramener la bonne ligne. Test de la limite d'agrégation exhaustive, pas seulement du raisonnement."
+  },
+  {
+    "id": "C2",
+    "categorie": "complexe",
+    "modalite": "excel",
+    "expected_behavior": "answer",
+    "evaluation_focus": "comparaison_entites_nommees",
+    "question": "Entre Nikola Jokić et Giannis Antetokounmpo, qui a le plus de rebonds totaux (REB) cette saison ?",
+    "reference_answer": "Nikola Jokić, 889 REB, contre Giannis Antetokounmpo, 797 REB.",
+    "source": "Données NBA"
+  },
+  {
+    "id": "C3",
+    "categorie": "complexe",
+    "modalite": "excel",
+    "expected_behavior": "answer",
+    "evaluation_focus": "retrieval_precompute",
+    "question": "D'après les données fournies, quelle équipe a le total de points cumulé le plus élevé sur la saison ?",
+    "reference_answer": "Detroit Pistons, 10 292 points.",
+    "source": "Analyse (cross-validé avec la somme des PTS par équipe dans Données NBA)",
+    "note": "Contrairement à C1, cette réponse est directement présente en clair dans un seul chunk indexé de la feuille Analyse (\"Detroit Pistons ... 10292\" au même endroit) — ne teste pas l'agrégation, teste la récupération d'un résultat déjà précalculé. Vérifié : les deux valeurs apparaissent dans le même chunk de 1424 caractères."
+  },
+  {
+    "id": "C4",
+    "categorie": "complexe",
+    "modalite": "pdf_reddit",
+    "expected_behavior": "answer",
+    "evaluation_focus": "synthese_multi_commentaires",
+    "question": "Quels arguments sont donnés pour et contre les Wolves comme équipe la plus impressionnante des playoffs ?",
+    "reference_answer": "Pour : certains commentateurs les placent nettement devant les autres et jugent leur plafond offensif/défensif très élevé, juste derrière OKC. Contre : d'autres estiment qu'ils n'ont rien montré de fondamentalement nouveau par rapport à la saison précédente.",
+    "source": "Reddit 1.pdf"
+  },
+  {
+    "id": "C5",
+    "categorie": "complexe",
+    "modalite": "pdf_reddit",
+    "expected_behavior": "answer",
+    "evaluation_focus": "synthese_multi_commentaires",
+    "question": "Quelles critiques sont formulées contre l'usage du rTS% pour désigner Reggie Miller comme l'option offensive la plus efficace de l'histoire des playoffs ?",
+    "reference_answer": "(1) Le TS% absolu devrait primer sur une comparaison relative à l'époque (analogie : le plus rapide ordinateur de 1955 n'est pas le plus rapide de tous les temps). (2) Le rTS% ne mesure que l'efficacité aux tirs, biaisée par les lancers francs, et ne capture pas l'ensemble de l'impact offensif d'un joueur.",
+    "source": "Reddit 3.pdf, p.18-19, 32",
+    "note": "Le point (2) cite nommément \"rTS%\" (pas \"TS%\") dans le commentaire source (u/Miserable-Lawyer-233, p.32) — vérifié mot pour mot, ne pas généraliser à TS%."
+  },
+  {
+    "id": "C6",
+    "categorie": "complexe",
+    "modalite": "pdf_reddit",
+    "expected_behavior": "answer",
+    "evaluation_focus": "synthese_multi_commentaires",
+    "question": "Quelles raisons sont avancées pour expliquer qu'un Thunder-Pacers en Finales serait perçu comme peu attractif malgré de meilleures stats avancées que d'autres équipes ?",
+    "reference_answer": "Petits marchés médiatiques (25e vs 45e marché) ; faible exposition nationale des Pacers ; stars jeunes moins connues du grand public ; attention médiatique davantage centrée sur les grandes franchises et stars déjà établies (LeBron, Curry) ; SGA encore peu connu du public occasionnel malgré son MVP.",
+    "source": "Reddit 2.pdf"
+  },
+  {
+    "id": "B1",
+    "categorie": "bruitee",
+    "modalite": "excel",
+    "sous_type": "absence_info",
+    "expected_behavior": "abstain_absence",
+    "evaluation_focus": "absence_grain_donnee",
+    "question": "Quel joueur a le meilleur pourcentage de réussite à 3 points sur les 5 derniers matchs ?",
+    "reference_answer": "Non calculable : le fichier ne contient que des agrégats de saison par joueur, aucune granularité par match.",
+    "source": "Données NBA — absence de colonne date/match"
+  },
+  {
+    "id": "B2",
+    "categorie": "bruitee",
+    "modalite": "excel",
+    "sous_type": "absence_info",
+    "expected_behavior": "abstain_absence",
+    "evaluation_focus": "absence_grain_donnee",
+    "question": "Compare les statistiques de rebonds de l'équipe à domicile et à l'extérieur.",
+    "reference_answer": "Non calculable : aucun indicateur domicile/extérieur n'existe dans le fichier.",
+    "source": "Données NBA — absence de colonne domicile/extérieur"
+  },
+  {
+    "id": "B3",
+    "categorie": "bruitee",
+    "modalite": "excel",
+    "sous_type": "premisse_trompeuse",
+    "expected_behavior": "flag_anomaly",
+    "evaluation_focus": "anomalie_schema",
+    "question": "Que représente réellement la colonne affichée \"15:00\" (ou \"15:00:00\") située entre FG% et 3PA dans le fichier de données ?",
+    "reference_answer": "Il s'agit très probablement de la colonne 3PM (tirs à 3 points réussis), dont le nom a été mal interprété par Excel comme l'horaire \"3 PM\" puis affiché 15:00. Ce n'est pas une vraie donnée temporelle.",
+    "source": "Données NBA, colonne 12 — bug d'autoformat Excel"
+  },
+  {
+    "id": "B4",
+    "categorie": "bruitee",
+    "modalite": "pdf_reddit",
+    "sous_type": "absence_info",
+    "expected_behavior": "abstain_absence",
+    "evaluation_focus": "absence_corpus",
+    "question": "Que disent les fans Reddit de la performance de Victor Wembanyama en playoffs 2025 ?",
+    "reference_answer": "Aucune mention de Wembanyama dans les 4 PDF Reddit fournis. (Il existe bien comme joueur dans le fichier Excel, mais la question porte spécifiquement sur les discussions Reddit.)",
+    "source": "Reddit 1-4.pdf — absent du corpus"
+  },
+  {
+    "id": "B5",
+    "categorie": "bruitee",
+    "modalite": "pdf_reddit",
+    "sous_type": "ambiguite",
+    "expected_behavior": "abstain_ambiguous",
+    "evaluation_focus": "ambiguite_subjective",
+    "question": "D'après Reddit, qui est objectivement le meilleur meneur de jeu de ces playoffs ?",
+    "reference_answer": "Pas de consensus dans les discussions : plusieurs joueurs (Haliburton, SGA...) sont mentionnés sous des angles différents.",
+    "source": "Reddit 1-4.pdf — question subjective sans réponse unique"
+  },
+  {
+    "id": "B6",
+    "categorie": "bruitee",
+    "modalite": "pdf_reddit",
+    "sous_type": "limite_retrieval",
+    "expected_behavior": "flag_limitation",
+    "evaluation_focus": "exhaustivite_retrieval",
+    "question": "Quelles équipes reviennent le plus souvent citées sur l'ensemble du fil de 15 pages de Reddit 1 (\"Who are teams in the playoffs that have impressed you?\") ?",
+    "reference_answer": "Non fiable avec l'architecture actuelle : l'information existe potentiellement dans le corpus (répartie sur ~18 chunks pour ce seul PDF), mais un retrieval sémantique top-k ne garantit pas une couverture exhaustive nécessaire à un comptage global fiable.",
+    "source": "Reddit 1.pdf — stress test d'exhaustivité du retrieval, pas une absence réelle d'info"
+  }
+]
