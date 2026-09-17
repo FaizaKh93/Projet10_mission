@@ -23,10 +23,11 @@ load_dotenv()  # charge .env (clés MISTRAL_API_KEY et OPENAI_API_KEY)
 # le répertoire depuis lequel ce script est lancé
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-# --- Système évalué : Mistral + FAISS (notre copie du prototype, jamais P10_DSML) ---
-from mistralai.client import MistralClient
-from mistralai.models.chat_completion import ChatMessage
-from config import MISTRAL_API_KEY, MODEL_NAME, SEARCH_K
+import logfire
+
+# --- Système évalué : agent Pydantic AI (Mistral) + FAISS (notre copie, jamais P10_DSML) ---
+from config import SEARCH_K
+from rag.generation import generate_answer
 from rag.vector_store import VectorStoreManager
 
 # --- Juge RAGAS : OpenAI (volontairement différent du système évalué, anti-biais) ---
@@ -35,43 +36,38 @@ from ragas.embeddings import OpenAIEmbeddings
 from ragas.llms import llm_factory
 from ragas.metrics.collections import AnswerCorrectness, ContextPrecision, ContextRecall, Faithfulness
 
-# Prompt système identique à app/chat.py — ne pas diverger, on évalue le système tel quel
-SYSTEM_PROMPT = """Tu es 'NBA Analyst AI', un assistant expert sur la ligue de basketball NBA.
-Ta mission est de répondre aux questions des fans en animant le débat.
+# --- Observabilité Logfire ---
+# NB: ces 2 lignes sont volontairement dupliquées à l'identique dans app/chat.py
+# (pas de module partagé) - si on les modifie ici, penser à faire la même chose là-bas.
+logfire.configure(send_to_logfire="if-token-present")
+logfire.instrument_pydantic_ai()  # trace automatiquement les appels de l'agent (rag/generation.py)
 
----
-{context_str}
----
-
-QUESTION DU FAN:
-{question}
-
-RÉPONSE DE L'ANALYSTE NBA:"""
+# Le prompt système n'est plus défini ici : il vit dans src/rag/generation.py, partagé
+# avec app/chat.py — c'est ce qui garantit qu'on évalue bien ce que l'app fait vraiment.
 
 
-def query_prototype(vector_store_manager: VectorStoreManager, mistral_client: MistralClient, question: str):
+def query_prototype(vector_store_manager: VectorStoreManager, question: str):
     """Reproduit exactement la logique de app/chat.py : recherche puis génération."""
     # Étape 1 : recherche vectorielle FAISS — les k chunks les plus proches sémantiquement de la question
     search_results = vector_store_manager.search(question, k=SEARCH_K)
 
-    # Étape 2 : assemble les chunks récupérés en un seul bloc de contexte texte pour le prompt
-    context_str = "\n\n---\n\n".join(
-        f"Source: {res['metadata'].get('source', 'Inconnue')} (Score: {res['score']:.1f}%)\nContenu: {res['text']}"
-        for res in search_results
-    ) or "Aucune information pertinente trouvée dans la base de connaissances pour cette question."
+    # Étape 2 : génération via l'agent Pydantic AI (assemblage du contexte, prompt et
+    # vérification des citations : tout est dans rag/generation.py)
+    rag_answer = generate_answer(search_results, question)
 
-    # Étape 3 : génération — le contexte + la question sont injectés dans le prompt système, puis envoyés à Mistral
-    final_prompt = SYSTEM_PROMPT.format(context_str=context_str, question=question)
-    response = mistral_client.chat(
-        model=MODEL_NAME,
-        messages=[ChatMessage(role="user", content=final_prompt)],
-        temperature=0.1,
-    )
-    answer = response.choices[0].message.content if response.choices else ""
+    # Le juge RAGAS attend une réponse texte. On lui donne la réponse telle que
+    # l'utilisateur la voit dans l'app (réponse + bandeau d'abstention), pour évaluer
+    # la même chose — et parce que la baseline envoyait déjà la sortie complète du
+    # modèle aux 4 métriques : garder une seule chaîne préserve la comparabilité.
+    # `rag_answer.answer` brut reste sauvegardé à part dans les résultats.
+    user_visible_answer = rag_answer.answer
+    if rag_answer.abstain and rag_answer.abstain_reason:
+        user_visible_answer = f"{user_visible_answer}\n\n[Réponse incertaine] {rag_answer.abstain_reason}"
+    answer = user_visible_answer
 
     # contexts = juste le texte des chunks (sans les métadonnées), c'est ce format que RAGAS attend
-    contexts = [res["text"] for res in search_results]
-    return contexts, answer
+    contexts = [res.text for res in search_results]
+    return contexts, answer, rag_answer
 
 
 def main(limit: int | None = None, label: str | None = None, force: bool = False):
@@ -96,7 +92,7 @@ def main(limit: int | None = None, label: str | None = None, force: bool = False
 
     print(f"Chargement du VectorStoreManager (système évalué)...")
     vector_store_manager = VectorStoreManager()  # charge l'index FAISS + les 302 chunks depuis data/vector_db/
-    mistral_client = MistralClient(api_key=MISTRAL_API_KEY)
+    # Plus de client Mistral ici : il est encapsulé dans l'agent de rag/generation.py
 
     print("Initialisation du juge RAGAS (OpenAI gpt-4o)...")
     openai_client = AsyncOpenAI()  # client asynchrone requis par ragas (score() lance ascore() en interne)
@@ -121,8 +117,8 @@ def main(limit: int | None = None, label: str | None = None, force: bool = False
         # côté juge) ne doit jamais faire perdre les résultats déjà obtenus (et déjà payés) sur les
         # cas précédents. On enregistre l'erreur pour ce cas et on continue avec le suivant.
         try:
-            # Interroge le système évalué (retrieval + génération Mistral) — voir query_prototype() plus haut
-            contexts, answer = query_prototype(vector_store_manager, mistral_client, case["question"])
+            # Interroge le système évalué (retrieval + génération via l'agent) — voir query_prototype() plus haut
+            contexts, answer, rag_answer = query_prototype(vector_store_manager, case["question"])
 
             # Métrique 1 - Faithfulness : la réponse invente-t-elle des faits absents du contexte récupéré
             # (hallucination) ? Compare chaque affirmation de `response` à ce qui est réellement dans `contexts`.
@@ -158,8 +154,17 @@ def main(limit: int | None = None, label: str | None = None, force: bool = False
                     "evaluation_focus": case["evaluation_focus"],
                     "question": case["question"],
                     "reference_answer": case["reference_answer"],
-                    "system_response": answer,
+                    "system_response": answer,  # = user_visible_answer, la chaîne notée par RAGAS
                     "retrieved_contexts": contexts,
+                    # Champs issus de la sortie structurée (RAGAnswer), stockés séparément :
+                    # ils servent à l'analyse comportementale (taux d'abstention, faux refus),
+                    # calculée sans juge LLM dans le notebook - axe distinct des 4 métriques RAGAS.
+                    # `answer_raw` est conservé sans la justification d'abstention, pour pouvoir
+                    # réanalyser plus tard sans perte d'information.
+                    "answer_raw": rag_answer.answer,
+                    "abstain": rag_answer.abstain,
+                    "abstain_reason": rag_answer.abstain_reason,
+                    "citations": rag_answer.citations,
                     "faithfulness": f.value,
                     "context_precision": cp.value,
                     "context_recall": cr.value,

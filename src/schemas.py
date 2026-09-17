@@ -1,0 +1,126 @@
+# src/schemas.py
+"""Contrats de données du pipeline RAG, validés par Pydantic.
+
+Partagé par loading/ et rag/ : placé à la racine de src/ pour que le chargement
+(loading) n'ait pas à importer depuis le RAG, ce qui inverserait la dépendance
+logique (c'est rag/ qui consomme ce que loading/ produit).
+
+Parcours des données et modèle correspondant :
+    fichier brut -> SourceDocument -> TextChunk -> EmbeddedChunk -> index Faiss
+    question -> SearchResult (chunks récupérés) -> RAGAnswer (réponse du modèle)
+"""
+from pydantic import BaseModel, Field, field_validator
+
+# Nombre minimal de caractères non blancs pour qu'un document extrait soit jugé
+# exploitable. Rejette les extractions résiduelles type "\nPage 1\n" ou "---" que
+# le test `if not extracted_content` laisse passer (il n'attrape que None et "").
+MIN_CARACTERES_DOCUMENT = 50
+
+
+class SourceDocument(BaseModel):
+    """Document extrait d'un fichier source (PDF, feuille Excel...), avant découpage."""
+
+    page_content: str
+    metadata: dict
+
+    @field_validator("page_content")
+    @classmethod
+    def contenu_exploitable(cls, v: str) -> str:
+        if len(v.strip()) < MIN_CARACTERES_DOCUMENT:
+            raise ValueError(
+                f"contenu extrait trop court ({len(v.strip())} caractères utiles, "
+                f"minimum {MIN_CARACTERES_DOCUMENT}) - extraction probablement ratée"
+            )
+        return v
+
+    @field_validator("metadata")
+    @classmethod
+    def source_renseignee(cls, v: dict) -> dict:
+        if not v.get("source"):
+            raise ValueError("metadata['source'] manquante : le document serait non traçable")
+        return v
+
+
+class TextChunk(BaseModel):
+    """Fragment de document prêt à être vectorisé."""
+
+    id: str = Field(min_length=1)
+    text: str
+    metadata: dict
+
+    @field_validator("text")
+    @classmethod
+    def texte_non_vide(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("chunk vide : rien à vectoriser")
+        return v
+
+    @field_validator("metadata")
+    @classmethod
+    def source_renseignee(cls, v: dict) -> dict:
+        if not v.get("source"):
+            raise ValueError("metadata['source'] manquante : citation impossible à tracer")
+        return v
+
+
+class EmbeddedChunk(BaseModel):
+    """Chunk associé à son vecteur. Interdit explicitement le vecteur nul : une
+    erreur d'embedding ne doit jamais être convertie en donnée fabriquée, sinon le
+    chunk entre dans l'index et devient définitivement irrécupérable (score 0)."""
+
+    id: str = Field(min_length=1)
+    embedding: list[float]
+
+    @field_validator("embedding")
+    @classmethod
+    def vecteur_valide(cls, v: list[float]) -> list[float]:
+        from config import EMBEDDING_DIM
+
+        if len(v) != EMBEDDING_DIM:
+            raise ValueError(f"dimension {len(v)} au lieu de {EMBEDDING_DIM} attendues")
+        if not any(v):
+            raise ValueError("vecteur nul : embedding manquant déguisé en donnée valide")
+        return v
+
+
+class SearchResult(BaseModel):
+    """Chunk renvoyé par la recherche vectorielle, juste avant injection dans le prompt."""
+
+    id: str = Field(min_length=1)
+    text: str
+    score: float = Field(ge=-100, le=100)  # similarité cosinus en %, peut être négative
+    metadata: dict
+    raw_score: float | None = None
+
+
+class RAGAnswer(BaseModel):
+    """Réponse structurée attendue du modèle, au lieu d'un texte libre.
+
+    citations référence des chunk_id (ex. "0_3") plutôt que du texte cité, pour
+    permettre une vérification déterministe en code Python (le chunk_id cité
+    existe-t-il bien parmi les chunks récupérés ?) plutôt qu'une recherche de
+    sous-chaîne fragile sur des valeurs numériques.
+
+    Pas de champ "grounded: bool" auto-déclaré par le LLM : un modèle qui
+    hallucine peut tout aussi bien répondre grounded=true à tort. La fiabilité
+    de la réponse se vérifie via "citations" (code), pas via une auto-évaluation
+    du modèle lui-même.
+    """
+
+    answer: str = Field(
+        description="La réponse à la question, basée uniquement sur le contexte fourni."
+    )
+    citations: list[str] = Field(
+        default_factory=list,
+        description="Les chunk_id (ex. '0_3') du contexte qui justifient la réponse.",
+    )
+    abstain: bool = Field(
+        default=False,
+        description="True si le contexte fourni ne permet pas de répondre de façon fiable "
+        "(donnée absente, question ambiguë, anomalie détectée dans les données).",
+    )
+    abstain_reason: str | None = Field(
+        default=None,
+        description="Si abstain=True, explique brièvement pourquoi (donnée absente, "
+        "question ambiguë, anomalie de données...).",
+    )

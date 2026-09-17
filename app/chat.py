@@ -4,9 +4,16 @@ import os
 import sys
 import logging
 from pathlib import Path
-from mistralai.client import MistralClient
-from mistralai.models.chat_completion import ChatMessage
+
+import logfire
+import truststore
 from dotenv import load_dotenv
+
+# Doit précéder logfire.configure() : derrière un proxy qui intercepte le TLS,
+# l'export des traces échoue sinon (silencieusement, avec un simple warning).
+# Ne pas compter sur l'injection faite à l'import de rag.vector_store : elle
+# dépendrait de l'ordre des imports.
+truststore.inject_into_ssl()
 
 # Rend le package src/ importable, quel que soit le répertoire depuis lequel cette appli est lancée
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
@@ -17,10 +24,20 @@ try:
         MISTRAL_API_KEY, MODEL_NAME, SEARCH_K,
         APP_TITLE, NAME
     )
+    from rag.generation import generate_answer
     from rag.vector_store import VectorStoreManager
 except ImportError as e:
     st.error(f"Erreur d'importation: {e}. Vérifiez la structure de vos dossiers et les fichiers dans 'src'.")
     st.stop()
+
+# --- Observabilité Logfire ---
+# NB: ces 2 lignes sont volontairement dupliquées à l'identique dans
+# eval/evaluate_ragas.py (pas de module partagé) - si on les modifie ici, penser à
+# faire la même chose là-bas.
+# send_to_logfire="if-token-present" : n'envoie rien tant qu'aucun token Logfire
+# n'est configuré, plutôt que d'échouer ou de demander une authentification
+logfire.configure(send_to_logfire="if-token-present")
+logfire.instrument_pydantic_ai()  # trace automatiquement les appels de l'agent (rag/generation.py)
 
 
 # --- Configuration du Logging ---
@@ -35,13 +52,8 @@ if not api_key:
     st.error("Erreur : Clé API Mistral non trouvée (MISTRAL_API_KEY). Veuillez la définir dans le fichier .env.")
     st.stop()
 
-try:
-    client = MistralClient(api_key=api_key)
-    logging.info("Client Mistral initialisé.")
-except Exception as e:
-    st.error(f"Erreur lors de l'initialisation du client Mistral : {e}")
-    logging.exception("Erreur initialisation client Mistral")
-    st.stop()
+# Le client Mistral n'est plus instancié ici : il est encapsulé dans l'agent
+# Pydantic AI de src/rag/generation.py (appelé via generate_answer()).
 
 # --- Chargement du Vector Store (mis en cache) ---
 @st.cache_resource # Garde le manager chargé en mémoire pour la session
@@ -69,56 +81,18 @@ def get_vector_store_manager():
 
 vector_store_manager = get_vector_store_manager()
 
-# --- Prompt Système pour RAG ---
-# Adaptez ce prompt selon vos besoins
-SYSTEM_PROMPT = f"""Tu es 'NBA Analyst AI', un assistant expert sur la ligue de basketball NBA.
-Ta mission est de répondre aux questions des fans en animant le débat.
-
----
-{{context_str}}
----
-
-QUESTION DU FAN:
-{{question}}
-
-RÉPONSE DE L'ANALYSTE NBA:"""
-
+# Le prompt système vit maintenant dans src/rag/generation.py (source unique,
+# partagée avec eval/evaluate_ragas.py pour que l'évaluation teste bien ce que
+# l'app fait réellement).
 
 # --- Initialisation de l'historique de conversation ---
 if "messages" not in st.session_state:
     # Message d'accueil initial
     st.session_state.messages = [{"role": "assistant", "content": f"Bonjour ! Je suis votre analyste IA pour la {NAME}. Posez-moi vos questions sur les équipes, les joueurs ou les statistiques, et je vous répondrai en me basant sur les données les plus récentes."}]
 
-# --- Fonctions ---
-
-def generer_reponse(prompt_messages: list[ChatMessage]) -> str:
-    """
-    Envoie le prompt (qui inclut maintenant le contexte) à l'API Mistral.
-    """
-    if not prompt_messages:
-         logging.warning("Tentative de génération de réponse avec un prompt vide.")
-         return "Je ne peux pas traiter une demande vide."
-    try:
-        logging.info(f"Appel à l'API Mistral modèle '{model}' avec {len(prompt_messages)} message(s).")
-        # Log le contenu du prompt (peut être long) - commenter si trop verbeux
-        # logging.debug(f"Prompt envoyé à l'API: {prompt_messages}")
-
-        response = client.chat(
-            model=model,
-            messages=prompt_messages,
-            temperature=0.1, # Température basse pour des réponses factuelles basées sur le contexte
-            # top_p=0.9,
-        )
-        if response.choices and len(response.choices) > 0:
-            logging.info("Réponse reçue de l'API Mistral.")
-            return response.choices[0].message.content
-        else:
-            logging.warning("L'API n'a pas retourné de choix valide.")
-            return "Désolé, je n'ai pas pu générer de réponse valide pour le moment."
-    except Exception as e:
-        st.error(f"Erreur lors de l'appel à l'API Mistral: {e}")
-        logging.exception("Erreur API Mistral pendant client.chat")
-        return "Je suis désolé, une erreur technique m'empêche de répondre. Veuillez réessayer plus tard."
+# La génération vit maintenant dans src/rag/generation.py : generate_answer()
+# renvoie un RAGAnswer validé (answer, citations, abstain, abstain_reason) au lieu
+# d'un texte libre.
 
 # --- Interface Utilisateur Streamlit ---
 st.title(APP_TITLE)
@@ -155,40 +129,37 @@ if prompt := st.chat_input(f"Posez votre question sur la {NAME}..."):
         logging.exception(f"Erreur pendant vector_store_manager.search pour la query: {prompt}")
         search_results = [] # On continue sans contexte si la recherche échoue
 
-    # 4. Formater le contexte pour le prompt LLM
-    context_str = "\n\n---\n\n".join([
-        f"Source: {res['metadata'].get('source', 'Inconnue')} (Score: {res['score']:.1f}%)\nContenu: {res['text']}"
-        for res in search_results
-    ])
-
     if not search_results:
-        context_str = "Aucune information pertinente trouvée dans la base de connaissances pour cette question."
         logging.warning(f"Aucun contexte trouvé pour la query: {prompt}")
-
-    # 5. Construire le prompt final pour l'API Mistral en utilisant le System Prompt RAG
-    final_prompt_for_llm = SYSTEM_PROMPT.format(context_str=context_str, question=prompt)
-
-    # Créer la liste de messages pour l'API (juste le prompt système/utilisateur combiné)
-    messages_for_api = [
-        # On pourrait séparer system et user, mais Mistral gère bien un long message user structuré
-        ChatMessage(role="user", content=final_prompt_for_llm)
-    ]
 
     # === Fin de la logique RAG ===
 
-
-    # 6. Afficher indicateur + Générer la réponse de l'assistant via LLM
+    # 4. Afficher indicateur + Générer la réponse via l'agent Pydantic AI
+    # (assemblage du contexte + prompt + validation des citations : voir rag/generation.py)
     with st.chat_message("assistant"):
         message_placeholder = st.empty()
         message_placeholder.text("...") # Indicateur simple
 
-        # Génération de la réponse de l'assistant en utilisant le prompt augmenté
-        response_content = generer_reponse(messages_for_api)
+        try:
+            answer = generate_answer(search_results, prompt)
+            response_content = answer.answer
+        except Exception as e:
+            st.error(f"Erreur lors de la génération de la réponse : {e}")
+            logging.exception("Erreur pendant generate_answer")
+            answer = None
+            response_content = "Je suis désolé, une erreur technique m'empêche de répondre. Veuillez réessayer plus tard."
 
-        # Affichage de la réponse complète
         message_placeholder.write(response_content)
 
-    # 7. Ajouter la réponse de l'assistant à l'historique (pour affichage UI)
+        # Rend visible la sortie structurée : abstention explicite et chunks cités
+        # (citations déjà filtrées côté generation.py si le modèle en a inventé)
+        if answer is not None:
+            if answer.abstain:
+                st.warning(f"Réponse incertaine : {answer.abstain_reason or 'raison non précisée'}")
+            if answer.citations:
+                st.caption(f"Sources citées (chunk_id) : {', '.join(answer.citations)}")
+
+    # 5. Ajouter la réponse de l'assistant à l'historique (pour affichage UI)
     st.session_state.messages.append({"role": "assistant", "content": response_content})
 
 # Petit pied de page optionnel
