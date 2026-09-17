@@ -24,8 +24,7 @@ load_dotenv()  # charge .env (clés MISTRAL_API_KEY et OPENAI_API_KEY)
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 # --- Système évalué : Mistral + FAISS (notre copie du prototype, jamais P10_DSML) ---
-from mistralai.client import MistralClient
-from mistralai.models.chat_completion import ChatMessage
+from mistralai.client import Mistral
 from config import MISTRAL_API_KEY, MODEL_NAME, SEARCH_K
 from rag.vector_store import VectorStoreManager
 
@@ -49,7 +48,7 @@ QUESTION DU FAN:
 RÉPONSE DE L'ANALYSTE NBA:"""
 
 
-def query_prototype(vector_store_manager: VectorStoreManager, mistral_client: MistralClient, question: str):
+def query_prototype(vector_store_manager: VectorStoreManager, mistral_client: Mistral, question: str):
     """Reproduit exactement la logique de app/chat.py : recherche puis génération."""
     # Étape 1 : recherche vectorielle FAISS — les k chunks les plus proches sémantiquement de la question
     search_results = vector_store_manager.search(question, k=SEARCH_K)
@@ -62,9 +61,9 @@ def query_prototype(vector_store_manager: VectorStoreManager, mistral_client: Mi
 
     # Étape 3 : génération — le contexte + la question sont injectés dans le prompt système, puis envoyés à Mistral
     final_prompt = SYSTEM_PROMPT.format(context_str=context_str, question=question)
-    response = mistral_client.chat(
+    response = mistral_client.chat.complete(
         model=MODEL_NAME,
-        messages=[ChatMessage(role="user", content=final_prompt)],
+        messages=[{"role": "user", "content": final_prompt}],
         temperature=0.1,
     )
     answer = response.choices[0].message.content if response.choices else ""
@@ -96,7 +95,7 @@ def main(limit: int | None = None, label: str | None = None, force: bool = False
 
     print(f"Chargement du VectorStoreManager (système évalué)...")
     vector_store_manager = VectorStoreManager()  # charge l'index FAISS + les 302 chunks depuis data/vector_db/
-    mistral_client = MistralClient(api_key=MISTRAL_API_KEY)
+    mistral_client = Mistral(api_key=MISTRAL_API_KEY)
 
     print("Initialisation du juge RAGAS (OpenAI gpt-4o)...")
     openai_client = AsyncOpenAI()  # client asynchrone requis par ragas (score() lance ascore() en interne)
