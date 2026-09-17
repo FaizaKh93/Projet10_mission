@@ -1,7 +1,6 @@
 # tests/test_evaluate_ragas.py
-"""Vérifie que query_prototype() (eval/evaluate_ragas.py) fonctionne toujours après
-la migration du client Mistral - ce fichier n'avait jamais été ré-exécuté depuis
-la migration (seulement relu/vérifié syntaxiquement).
+"""Vérifie que query_prototype() (eval/evaluate_ragas.py) enchaîne correctement
+recherche + génération via l'agent Pydantic AI.
 
 Appelle la vraie API Mistral (facturé, coût négligeable) : jamais lancé par un
 simple `pytest`, seulement via `pytest -m api`.
@@ -16,9 +15,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "eval"))
 
 from evaluate_ragas import query_prototype
+from rag.schemas import RAGAnswer
 from rag.vector_store import VectorStoreManager
-from mistralai.client import Mistral
-from config import MISTRAL_API_KEY
 
 pytestmark = pytest.mark.api
 
@@ -28,19 +26,19 @@ def vector_store():
     return VectorStoreManager()
 
 
-@pytest.fixture(scope="module")
-def mistral_client():
-    return Mistral(api_key=MISTRAL_API_KEY)
-
-
-def test_query_prototype(vector_store, mistral_client):
-    """query_prototype() doit enchaîner recherche + génération sans erreur, en
-    utilisant en interne la syntaxe migrée (mistral_client.chat.complete(),
-    plus l'ancien .chat())."""
-    contexts, answer = query_prototype(
-        vector_store, mistral_client, "Combien de points Nikola Jokić a-t-il marqués ?"
+def test_query_prototype(vector_store):
+    """query_prototype() renvoie maintenant un triplet : les textes des chunks (pour
+    RAGAS), la réponse telle que vue par l'utilisateur, et l'objet RAGAnswer complet
+    (pour l'analyse comportementale)."""
+    contexts, answer, rag_answer = query_prototype(
+        vector_store, "Combien de points Nikola Jokić a-t-il marqués ?"
     )
     # contexts = liste des textes des chunks récupérés (peut être vide, mais jamais None)
     assert isinstance(contexts, list)
-    # answer = la réponse générée par Mistral, ne doit jamais être vide
+    # answer = chaîne envoyée au juge RAGAS, ne doit jamais être vide
     assert answer
+    # rag_answer = sortie structurée, source des champs abstain/citations du JSON de résultats
+    assert isinstance(rag_answer, RAGAnswer)
+    # Si le modèle s'abstient, la raison doit se retrouver dans la réponse notée par RAGAS
+    if rag_answer.abstain and rag_answer.abstain_reason:
+        assert rag_answer.abstain_reason in answer

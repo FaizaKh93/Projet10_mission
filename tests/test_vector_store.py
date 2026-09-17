@@ -39,6 +39,8 @@ def test_search_returns_plausible_results(vector_store):
         # score = similarité en pourcentage (0-100%, voir vector_store.py:search())
         assert 0 <= r["score"] <= 100
         assert r["text"]
+        # id = chunk_id, indispensable à RAGAnswer.citations et à leur vérification
+        assert r["id"]
 
 
 def test_generate_embeddings_batch(vector_store):
