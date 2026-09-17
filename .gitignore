@@ -6,6 +6,9 @@ P10_DSML/
 *.env
 !.env.example
 
+# Configuration locale Logfire (contient le token du projet)
+.logfire/
+
 # Python
 __pycache__/
 *.pyc

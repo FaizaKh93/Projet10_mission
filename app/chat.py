@@ -6,7 +6,14 @@ import logging
 from pathlib import Path
 
 import logfire
+import truststore
 from dotenv import load_dotenv
+
+# Doit précéder logfire.configure() : derrière un proxy qui intercepte le TLS,
+# l'export des traces échoue sinon (silencieusement, avec un simple warning).
+# Ne pas compter sur l'injection faite à l'import de rag.vector_store : elle
+# dépendrait de l'ordre des imports.
+truststore.inject_into_ssl()
 
 # Rend le package src/ importable, quel que soit le répertoire depuis lequel cette appli est lancée
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
