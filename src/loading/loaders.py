@@ -9,6 +9,9 @@ from typing import List, Dict, Optional, Union
 import logging
 import numpy as np
 from tqdm import tqdm # Ajout de tqdm
+from pydantic import ValidationError
+
+from schemas import SourceDocument
 
 # La console Windows n'est pas en UTF-8 par défaut : les barres de progression
 # d'easyocr (caractères '█') font planter les flux stdout/stderr sans ce correctif
@@ -20,25 +23,39 @@ if sys.platform == "win32":
 try:
     import fitz  # PyMuPDF
     from PIL import Image
-    import easyocr
-
-    # Initialiser le lecteur EasyOCR une seule fois
-    logging.info("Initialisation du lecteur EasyOCR...")
-    reader = easyocr.Reader(['en', 'fr']) 
-    logging.info("Lecteur EasyOCR initialisé.")
-
 except ImportError as e:
-    logging.warning(f"Modules OCR (PyMuPDF, Pillow, easyocr) non installés ou erreur: {e}. L'OCR pour PDF ne sera pas disponible.")
+    logging.warning(f"Modules PDF/image (PyMuPDF, Pillow) non installés: {e}. L'OCR pour PDF ne sera pas disponible.")
     fitz = None
     Image = None
-    easyocr = None
-    reader = None
-except Exception as e:
-    logging.error(f"Erreur inattendue lors du chargement des modules/modèle OCR: {e}")
-    fitz = None
-    Image = None
-    easyocr = None
-    reader = None
+
+# Lecteur EasyOCR chargé à la demande (singleton de module), pas à l'import.
+# Avant, `easyocr.Reader(...)` s'exécutait au chargement du module : importer
+# loaders.py chargeait un modèle OCR complet, même pour traiter un simple Excel
+# ou pour lancer un test. Le coût n'est désormais payé que si un PDF a réellement
+# besoin d'OCR.
+_ocr_reader = None
+
+
+def get_ocr_reader():
+    """Renvoie le lecteur EasyOCR, en l'initialisant au premier appel réel.
+
+    Renvoie None si EasyOCR est indisponible : l'appelant doit gérer ce cas.
+    """
+    global _ocr_reader
+    if _ocr_reader is None:
+        try:
+            import easyocr  # importé ici : `import easyocr` charge torch, c'est lourd
+
+            logging.info("Initialisation du lecteur EasyOCR...")
+            _ocr_reader = easyocr.Reader(['en', 'fr'])
+            logging.info("Lecteur EasyOCR initialisé.")
+        except ImportError as e:
+            logging.warning(f"easyocr non installé: {e}. L'OCR pour PDF ne sera pas disponible.")
+            return None
+        except Exception as e:
+            logging.error(f"Erreur inattendue lors du chargement du modèle OCR: {e}")
+            return None
+    return _ocr_reader
 
 # Configuration du logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -47,7 +64,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 def extract_text_from_pdf_with_ocr(file_path: str) -> Optional[str]:
     """Extrait le texte d'un fichier PDF en utilisant l'OCR (EasyOCR)."""
-    if not fitz or not reader:
+    ocr_reader = get_ocr_reader()  # charge le modèle seulement maintenant
+    if not fitz or not ocr_reader:
         logging.warning("Modules/Modèle OCR non disponibles. Impossible d'effectuer l'OCR.")
         return None
 
@@ -62,7 +80,7 @@ def extract_text_from_pdf_with_ocr(file_path: str) -> Optional[str]:
             
             try:
                 img_np = np.array(img)
-                results = reader.readtext(img_np)
+                results = ocr_reader.readtext(img_np)
                 page_text = "\n".join([res[1] for res in results])
                 text_content.append(page_text)
                 # logging.info(f"OCR effectuée sur la page {page_num + 1} de {file_path} avec EasyOCR") # Commenté pour éviter le spam de logs avec tqdm
@@ -162,6 +180,34 @@ def extract_text_from_csv(file_path: str) -> Optional[str]:
         logging.error(f"Erreur extraction CSV {file_path}: {e}")
         return None
 
+def validate_excel_schema(df, sheet_name: str, file_path: str) -> List[str]:
+    """Contrôle métier du tableau AVANT sa conversion en texte.
+
+    À appeler impérativement avant `df.to_string()` : une fois le tableau aplati en
+    texte, les noms de colonnes et leurs types n'existent plus, et une corruption
+    d'en-tête devient indétectable.
+
+    Cas réellement observé dans ce projet : la colonne "3PM" (tirs à 3 points réussis)
+    a été réinterprétée par Excel comme l'horaire "3 PM" et stockée en datetime.time,
+    affichée "15:00". Les valeurs étaient intactes, seul l'en-tête était corrompu —
+    donc on signale sans rejeter le document.
+    """
+    anomalies = []
+    for col in df.columns:
+        if not isinstance(col, str):
+            # On affiche la valeur telle qu'Excel la montre (ex. "15:00:00") en plus
+            # du type : c'est sous cette forme que la personne la verra dans le fichier
+            anomalies.append(
+                f"en-tête '{col}' de type {type(col).__name__} au lieu de str "
+                f"(probable réinterprétation par Excel)"
+            )
+    if anomalies:
+        logging.warning(
+            f"Anomalies de schéma dans {file_path} (feuille '{sheet_name}') : " + " ; ".join(anomalies)
+        )
+    return anomalies
+
+
 def extract_text_from_excel(file_path: str) -> Optional[Union[str, Dict[str, str]]]:
     """Extrait le texte de chaque feuille d'un fichier Excel."""
     try:
@@ -171,6 +217,8 @@ def extract_text_from_excel(file_path: str) -> Optional[Union[str, Dict[str, str
         sheets_data = {}
         for sheet_name in excel_file.sheet_names:
             df = excel_file.parse(sheet_name)
+            # Contrôle du schéma tant que la structure existe encore (avant to_string)
+            validate_excel_schema(df, sheet_name, file_path)
             sheets_data[sheet_name] = df.to_string()
         
         logging.info(f"Texte extrait de {len(sheets_data)} feuille(s) dans Excel: {file_path}")
@@ -257,8 +305,8 @@ def load_and_parse_files(input_dir: str) -> List[Dict[str, any]]:
             
             # Si c'est un dictionnaire (plusieurs feuilles Excel), créer un doc par feuille
             if isinstance(extracted_content, dict):
-                for sheet_name, text in extracted_content.items():
-                    documents.append({
+                candidats = [
+                    {
                         "page_content": text,
                         "metadata": {
                             "source": f"{str(relative_path)} (Feuille: {sheet_name})",
@@ -267,9 +315,11 @@ def load_and_parse_files(input_dir: str) -> List[Dict[str, any]]:
                             "category": source_folder,
                             "full_path": str(file_path.resolve())
                         }
-                    })
+                    }
+                    for sheet_name, text in extracted_content.items()
+                ]
             else: # Pour tous les autres types de fichiers
-                 documents.append({
+                candidats = [{
                     "page_content": extracted_content,
                     "metadata": {
                         "source": str(relative_path),
@@ -277,7 +327,20 @@ def load_and_parse_files(input_dir: str) -> List[Dict[str, any]]:
                         "category": source_folder,
                         "full_path": str(file_path.resolve())
                     }
-                })
+                }]
+
+            # Contrat vérifié avant d'entrer dans le pipeline : contenu réellement
+            # exploitable et source renseignée. Le test `if not extracted_content`
+            # plus haut n'attrape que None et "" — pas une extraction résiduelle
+            # du type "\nPage 1\n" qu'un PDF illisible peut produire.
+            for doc in candidats:
+                try:
+                    SourceDocument(**doc)
+                except ValidationError as e:
+                    raison = e.errors()[0]["msg"]
+                    logging.warning(f"Document écarté — {doc['metadata']['source']} : {raison}")
+                    continue
+                documents.append(doc)
 
     logging.info(f"{len(documents)} documents chargés et parsés.")
     return documents

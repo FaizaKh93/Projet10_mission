@@ -39,9 +39,19 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# Par défaut, "pytest" seul n'exécute jamais les tests marqués "api" (vrais appels
-# payants à Mistral) : il faut explicitement lancer "pytest -m api" pour ceux-là.
-addopts = "-m 'not api'"
+# Par défaut, "pytest" seul n'exécute ni les tests "api" (vrais appels payants à
+# Mistral) ni les tests "slow" (chargement réel du modèle OCR) : il faut les
+# demander explicitement.
+addopts = "-m 'not api and not slow'"
 markers = [
     "api: tests appelant de vraies API externes payantes (Mistral) - lancer avec `pytest -m api`",
+    "slow: tests chargeant un modèle lourd (EasyOCR) - lancer avec `pytest -m slow`",
 ]
+# ATTENTION : ne pas lancer `pytest -m ""` (tout dans un seul processus). Sur Windows,
+# importer torch (via easyocr, test `slow`) après que la pile d'évaluation (ragas,
+# logfire) a été chargée fait planter l'interpréteur ("Fatal Python error: Aborted"),
+# un conflit entre extensions natives. Chaque suite passe sans problème dans son
+# propre processus :
+#     uv run pytest && uv run pytest -m api && uv run pytest -m slow
+# Le pipeline réel n'est pas concerné : scripts/index.py ne charge ni ragas ni logfire
+# (ordre d'import vérifié).

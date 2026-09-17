@@ -9,7 +9,7 @@ from pydantic_ai.providers.mistral import MistralProvider
 from pydantic_ai.settings import ModelSettings
 
 from config import MISTRAL_API_KEY, MODEL_NAME
-from rag.schemas import RAGAnswer
+from schemas import RAGAnswer, SearchResult
 
 # Prompt repris MOT POUR MOT du prototype d'origine (app/chat.py et eval/evaluate_ragas.py),
 # volontairement non modifié : cette étape mesure l'effet de la couche Pydantic AI seule,
@@ -48,24 +48,24 @@ agent = Agent(
 )
 
 
-def _format_context(search_results: list[dict]) -> str:
+def _format_context(search_results: list[SearchResult]) -> str:
     """Assemble les chunks récupérés en texte pour le prompt, chunk_id visible
     pour que le modèle puisse le citer dans RAGAnswer.citations."""
     return "\n\n---\n\n".join(
-        f"chunk_id: {res['id']} | Source: {res['metadata'].get('source', 'Inconnue')} (Score: {res['score']:.1f}%)\n"
-        f"Contenu: {res['text']}"
+        f"chunk_id: {res.id} | Source: {res.metadata.get('source', 'Inconnue')} (Score: {res.score:.1f}%)\n"
+        f"Contenu: {res.text}"
         for res in search_results
     ) or "Aucune information pertinente trouvée dans la base de connaissances pour cette question."
 
 
-def verify_citations(answer: RAGAnswer, search_results: list[dict]) -> RAGAnswer:
+def verify_citations(answer: RAGAnswer, search_results: list[SearchResult]) -> RAGAnswer:
     """Retire les chunk_id cités qui n'existent pas dans les chunks récupérés.
 
     Vérification déterministe faite en code, pas par le LLM (cf. schemas.py) : un
     chunk_id inventé est un signal d'hallucination. Fonction séparée de
     generate_answer() pour être testable sans appel API.
     """
-    valid_ids = {res["id"] for res in search_results}
+    valid_ids = {res.id for res in search_results}
     invalid_citations = [c for c in answer.citations if c not in valid_ids]
     if invalid_citations:
         logging.warning(
@@ -75,7 +75,7 @@ def verify_citations(answer: RAGAnswer, search_results: list[dict]) -> RAGAnswer
     return answer
 
 
-def generate_answer(search_results: list[dict], question: str) -> RAGAnswer:
+def generate_answer(search_results: list[SearchResult], question: str) -> RAGAnswer:
     """Génère une réponse structurée à partir des chunks récupérés et de la question."""
     context_str = _format_context(search_results)
     # Même assemblage que le prototype d'origine : le template complet dans un seul message

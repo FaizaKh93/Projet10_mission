@@ -15,7 +15,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "eval"))
 
 from evaluate_ragas import query_prototype
-from rag.schemas import RAGAnswer
+from schemas import RAGAnswer
 from rag.vector_store import VectorStoreManager
 
 pytestmark = pytest.mark.api

@@ -66,7 +66,7 @@ def query_prototype(vector_store_manager: VectorStoreManager, question: str):
     answer = user_visible_answer
 
     # contexts = juste le texte des chunks (sans les métadonnées), c'est ce format que RAGAS attend
-    contexts = [res["text"] for res in search_results]
+    contexts = [res.text for res in search_results]
     return contexts, answer, rag_answer
 
 

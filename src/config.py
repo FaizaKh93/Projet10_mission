@@ -19,6 +19,7 @@ if not MISTRAL_API_KEY:
 
 # --- Modèles Mistral ---
 EMBEDDING_MODEL = "mistral-embed"
+EMBEDDING_DIM = 1024                # Dimension fixe des vecteurs de mistral-embed (doc officielle Mistral)
 MODEL_NAME = "mistral-small-latest" # Ou un autre modèle comme mistral-large-latest
 
 # --- Configuration de l'Indexation ---

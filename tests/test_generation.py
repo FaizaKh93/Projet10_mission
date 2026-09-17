@@ -12,13 +12,14 @@ Deux groupes de tests :
 import pytest
 
 from rag.generation import _format_context, generate_answer, verify_citations
-from rag.schemas import RAGAnswer
+from schemas import RAGAnswer, SearchResult
 
-# Chunks factices réutilisés par les tests gratuits : même structure que ce que
-# renvoie VectorStoreManager.search() (id, score, text, metadata)
+# Chunks factices réutilisés par les tests gratuits : de vrais SearchResult, donc
+# exactement ce que renvoie VectorStoreManager.search() - les tests reproduisent le
+# contrat réel du code, pas une approximation en dict
 CHUNKS = [
-    {"id": "0_3", "score": 78.4, "text": "Jokić a marqué 2072 points", "metadata": {"source": "regular NBA.xlsx"}},
-    {"id": "1_7", "score": 61.2, "text": "Curry : 93,3% aux lancers francs", "metadata": {"source": "regular NBA.xlsx"}},
+    SearchResult(id="0_3", score=78.4, text="Jokić a marqué 2072 points", metadata={"source": "regular NBA.xlsx"}),
+    SearchResult(id="1_7", score=61.2, text="Curry : 93,3% aux lancers francs", metadata={"source": "regular NBA.xlsx"}),
 ]
 
 
