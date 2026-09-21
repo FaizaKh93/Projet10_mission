@@ -8,7 +8,15 @@ import pytest
 from pydantic import ValidationError
 
 from config import EMBEDDING_DIM
-from schemas import EmbeddedChunk, RAGAnswer, SearchResult, SourceDocument, TextChunk
+from schemas import (
+    EmbeddedChunk,
+    PlayerRow,
+    RAGAnswer,
+    SearchResult,
+    SourceDocument,
+    TeamRow,
+    TextChunk,
+)
 
 CONTENU_VALIDE = "Statistiques NBA de la saison régulière pour l'ensemble des joueurs."
 
@@ -97,3 +105,66 @@ def test_rag_answer_valeurs_par_defaut():
     assert a.citations == []
     assert a.abstain is False
     assert a.abstain_reason is None
+
+
+# --- TeamRow et PlayerRow : lignes de l'Excel, avant insertion en base ---
+
+
+def test_team_row_valide():
+    assert TeamRow(code="OKC", name="Oklahoma City Thunder").code == "OKC"
+
+
+def test_team_row_code_trop_court_refuse():
+    """Un code d'équipe fait 2 à 4 caractères (ATL, BKN...). Une cellule vide ou
+    tronquée doit être rejetée, pas insérée telle quelle."""
+    with pytest.raises(ValidationError):
+        TeamRow(code="", name="Oklahoma City Thunder")
+
+
+# Les vraies valeurs de SGA sur la saison 2024-25
+SGA = {
+    "full_name": "Shai Gilgeous-Alexander", "team_code": "OKC",
+    "games_played": 76, "wins_total": 63, "losses_total": 13,
+    "fgm_total": 859, "fga_total": 1657,
+    "three_pm_total": 160, "three_pa_total": 433,
+    "ftm_total": 600, "fta_total": 669,
+}
+
+
+def test_player_row_valide():
+    assert PlayerRow(**SGA).full_name == "Shai Gilgeous-Alexander"
+
+
+@pytest.mark.parametrize(
+    "reussis, tentes",
+    [("fgm_total", "fga_total"), ("three_pm_total", "three_pa_total"), ("ftm_total", "fta_total")],
+)
+def test_player_row_refuse_plus_de_reussis_que_de_tentes(reussis, tentes):
+    """LE test central de cette table, sur les trois familles de tirs.
+
+    On ne peut pas réussir plus de tirs qu'on n'en tente. C'est l'invariant qui
+    prouve que la colonne à l'en-tête corrompu (« 15:00:00 ») contient bien 3PM,
+    et il détecterait un décalage de colonnes dans un futur export.
+    """
+    ligne = dict(SGA)
+    ligne[reussis] = ligne[tentes] + 1  # un réussi de plus que de tentés : impossible
+    with pytest.raises(ValidationError, match="décalées"):
+        PlayerRow(**ligne)
+
+
+def test_player_row_refuse_victoires_defaites_incoherentes():
+    """Identité structurelle : tout match joué est une victoire ou une défaite.
+
+    Pas de match nul en NBA, donc w + l == gp — quelle que soit la longueur de la
+    saison. On ne vérifie volontairement PAS `gp <= 82` : la saison a déjà été
+    écourtée (50 matchs en 1998-99, 66 en 2011-12, 72 en 2020-21), et un joueur
+    transféré peut dépasser 82 matchs.
+    """
+    with pytest.raises(ValidationError, match="games_played"):
+        PlayerRow(**{**SGA, "wins_total": 50})  # 50 + 13 != 76
+
+
+def test_player_row_refuse_valeur_negative():
+    """Un nombre de tirs ne peut pas être négatif (contrainte ge=0)."""
+    with pytest.raises(ValidationError):
+        PlayerRow(**{**SGA, "three_pm_total": -1})

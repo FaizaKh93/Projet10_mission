@@ -9,7 +9,7 @@ Parcours des données et modèle correspondant :
     fichier brut -> SourceDocument -> TextChunk -> EmbeddedChunk -> index Faiss
     question -> SearchResult (chunks récupérés) -> RAGAnswer (réponse du modèle)
 """
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 # Nombre minimal de caractères non blancs pour qu'un document extrait soit jugé
 # exploitable. Rejette les extractions résiduelles type "\nPage 1\n" ou "---" que
@@ -91,6 +91,80 @@ class SearchResult(BaseModel):
     score: float = Field(ge=-100, le=100)  # similarité cosinus en %, peut être négative
     metadata: dict
     raw_score: float | None = None
+
+
+class TeamRow(BaseModel):
+    """Une franchise, lue depuis la feuille « Equipe »."""
+
+    code: str = Field(min_length=2, max_length=4)
+    name: str = Field(min_length=3)
+
+
+class PlayerRow(BaseModel):
+    """Une ligne joueur de la feuille « Données NBA », avant insertion en base.
+
+    Ne valide que ce qui pourrait être silencieusement faux ; les types sont déjà
+    garantis par les tables STRICT côté SQLite.
+
+    Deux règles volontairement ABSENTES, car elles paraissent raisonnables mais
+    rejetteraient des données valides (vérifié sur le fichier réel) :
+    - « aucune valeur négative » : plus_minus est négatif pour 325 joueurs,
+      netrtg pour 327, pie pour 9 — un différentiel négatif est normal ;
+    - « pourcentages entre 0 et 100 » : efg_pct peut atteindre 150 % puisque
+      EFG% = (FGM + 0,5 × 3PM) / FGA.
+
+    Écartée aussi : « gp <= 82 ». La saison régulière compte habituellement 82
+    matchs, mais elle a été écourtée (50 en 1998-99, 66 en 2011-12, 72 en 2020-21),
+    et un joueur transféré peut dépasser ce total, les calendriers des deux équipes
+    ne coïncidant pas.
+    """
+
+    full_name: str = Field(min_length=2)
+    team_code: str = Field(min_length=2, max_length=4)
+    games_played: int = Field(ge=0)
+    wins_total: int = Field(ge=0)
+    losses_total: int = Field(ge=0)
+    fgm_total: int = Field(ge=0)
+    fga_total: int = Field(ge=0)
+    three_pm_total: int = Field(ge=0)
+    three_pa_total: int = Field(ge=0)
+    ftm_total: int = Field(ge=0)
+    fta_total: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def tirs_reussis_inferieurs_aux_tentes(self) -> "PlayerRow":
+        """On ne peut pas réussir plus de tirs qu'on n'en tente.
+
+        Vérifié sur les 569 lignes du fichier actuel, pour les trois familles de
+        tirs. C'est ce qui identifie la colonne à l'en-tête corrompu : si un futur
+        export décalait les colonnes, l'ingestion s'arrêterait ici plutôt que de
+        remplir three_pm_total avec une autre statistique.
+        """
+        for reussis, tentes, libelle in (
+            (self.fgm_total, self.fga_total, "fgm/fga"),
+            (self.three_pm_total, self.three_pa_total, "three_pm/three_pa"),
+            (self.ftm_total, self.fta_total, "ftm/fta"),
+        ):
+            if reussis > tentes:
+                raise ValueError(
+                    f"{libelle} : {reussis} réussis pour {tentes} tentés — "
+                    "colonnes probablement décalées"
+                )
+        return self
+
+    @model_validator(mode="after")
+    def victoires_et_defaites_couvrent_les_matchs(self) -> "PlayerRow":
+        """Identité structurelle : tout match joué est une victoire ou une défaite.
+
+        Il n'y a pas de match nul en NBA, donc w + l == gp quelle que soit la
+        longueur de la saison. Un écart signalerait des colonnes désalignées.
+        """
+        if self.wins_total + self.losses_total != self.games_played:
+            raise ValueError(
+                f"wins ({self.wins_total}) + losses ({self.losses_total}) != "
+                f"games_played ({self.games_played})"
+            )
+        return self
 
 
 class RAGAnswer(BaseModel):

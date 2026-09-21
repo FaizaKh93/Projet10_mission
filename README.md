@@ -84,6 +84,93 @@ Deux problèmes indépendants de la logique métier ont dû être corrigés pour
 - **TLS** (`src/rag/vector_store.py`) : les appels à l'API Mistral échouaient (`CERTIFICATE_VERIFY_FAILED`) derrière le proxy/antivirus local qui inspecte le trafic HTTPS. Corrigé via [`truststore`](https://github.com/sethmlarson/truststore), qui fait confiance au magasin de certificats du système plutôt qu'au bundle `certifi` embarqué.
 - **Encodage console Windows** (`src/loading/loaders.py`) : les barres de progression d'EasyOCR (caractères Unicode `█`) faisaient planter l'initialisation de l'OCR sur la console Windows par défaut (non-UTF-8), empêchant toute extraction des PDF scannés. Corrigé en forçant `stdout`/`stderr` en UTF-8 au démarrage.
 
+## Base de données relationnelle (`data/nba.db`)
+
+Construite depuis `regular NBA.xlsx` par `uv run python scripts/load_excel_to_db.py`. Elle est **entièrement régénérable**, donc gitignorée comme l'index vectoriel. SQLite a été retenu pour le faible volume (599 lignes), l'usage mono-utilisateur en lecture, et l'absence de serveur à déployer ; SQLAlchemy garde l'architecture portable vers PostgreSQL par simple changement d'URL.
+
+```mermaid
+erDiagram
+    TEAMS ||--o{ STATS : "joue pour"
+    PLAYERS ||--o{ STATS : "realise"
+
+    TEAMS {
+        TEXT code PK "code a 3 lettres comme OKC"
+        TEXT name "nom complet de la franchise"
+    }
+    PLAYERS {
+        INTEGER player_id PK
+        TEXT full_name UK "identite stable dans le temps"
+    }
+    STATS {
+        INTEGER stat_id PK
+        INTEGER player_id FK "vers players"
+        TEXT team_code FK "vers teams - equipe de CETTE saison"
+        TEXT season UK "2024-25"
+        INTEGER age
+        INTEGER games_played
+        INTEGER pts_total "et 20 autres totaux de saison"
+        REAL minutes_per_game "et plus_minus_per_game"
+        REAL fg_pct "et 9 autres pourcentages"
+        REAL offrtg "et 7 autres indices avances"
+    }
+```
+
+### Les clés
+
+| Relation | Signification |
+|---|---|
+| `stats.player_id` → `players.player_id` | de qui sont ces statistiques |
+| `stats.team_code` → `teams.code` | dans quelle équipe, **cette saison-là** |
+| `UNIQUE (player_id, season)` | définit le grain : une ligne = un joueur sur une saison |
+
+`stats` est la seule table qui pointe vers les autres : elle porte les faits, `teams` et `players` sont des tables de référence. L'équipe et l'âge sont sur `stats` et non sur `players`, parce qu'ils changent d'une saison à l'autre.
+
+### Conventions de nommage
+
+Le fichier source mélange les unités sans le documenter — son dictionnaire annonce « en moyenne par match » pour des colonnes qui sont en réalité des totaux. Les suffixes lèvent l'ambiguïté :
+
+| Suffixe | Sens | Exemple (SGA) |
+|---|---|---|
+| `_total` | agrégat de la saison | `pts_total` = 2485 |
+| `_per_game` | moyenne par match | `minutes_per_game` = 34,2 |
+| `_pct` | pourcentage 0-100 | `fg_pct` = 51,9 |
+| *aucun* | indice déjà normalisé | `offrtg` = 122 |
+
+C'est une précaution nécessaire : ces noms seront injectés dans le prompt du tool SQL, et une colonne `pts` ambiguë produirait des réponses du type *« SGA marque 2485 points par match »*.
+
+### Anomalies des données source, corrigées ou documentées
+
+- **Colonne `3PM`** : Excel a interprété l'en-tête comme l'horaire « 3 PM » et l'a stocké en `datetime.time(15, 0)`. Seul le nom était perdu — les valeurs sont intactes. Renommée à l'ingestion en `three_pm_total`, avec un contrôle permanent (`three_pm ≤ three_pa`) qui arrêterait l'ingestion si un futur export décalait les colonnes.
+- **Pourcentages** : `fg_pct` **n'est pas** `fgm_total / fga_total`. L'écart diminue quand le volume augmente, signature d'une moyenne des pourcentages match par match. Les deux valeurs sont justes, elles ne mesurent pas la même chose — à ne pas recalculer.
+- **Totaux dérivés** : ~95 % se reconstruisent par `round(moyenne par match, 1) × matchs joués`, d'où une imprécision d'environ 0,3 %.
+- **`reb_total` ≠ `oreb_total` + `dreb_total`** dans ce fichier.
+
+### Requêtes types
+
+Les trois tableaux d'analyse du classeur (*Analyse de la saison*, *Analyse d'une équipe*, *Top 15 des joueurs en points*) sont des **agrégats dérivés** de la feuille `Données NBA` — ils ne deviennent donc pas des tables, mais des requêtes :
+
+```sql
+-- Top 15 des marqueurs
+SELECT p.full_name, s.pts_total
+FROM stats s JOIN players p USING (player_id)
+ORDER BY s.pts_total DESC LIMIT 15;
+
+-- Analyse d'une équipe
+SELECT p.full_name, s.pts_total, s.reb_total, s.ast_total
+FROM stats s JOIN players p USING (player_id)
+JOIN teams t ON t.code = s.team_code
+WHERE t.name = 'Detroit Pistons';
+
+-- Total de points par équipe sur la saison
+SELECT t.name, SUM(s.pts_total) AS points
+FROM stats s JOIN teams t ON t.code = s.team_code
+GROUP BY t.name ORDER BY points DESC;
+```
+
+### Tables non alimentées
+
+La consigne prévoit également `matches` et `reports`. `matches` **n'est pas constructible** : les sources ne contiennent aucune granularité par match (ni date, ni adversaire, ni identifiant de rencontre) — uniquement des agrégats de saison. C'est aussi ce qui rend les questions domicile/extérieur sans réponse calculable, conformément aux cas B1 et B2 du jeu de test. `reports` reste en attente d'une décision sur son contenu.
+
 ## État d'avancement
 
 - [x] Environnement reproductible (uv, Python 3.11)

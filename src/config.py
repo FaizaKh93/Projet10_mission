@@ -29,17 +29,26 @@ VECTOR_DB_DIR = str(PROJECT_ROOT / "data" / "vector_db") # Dossier pour l'index 
 FAISS_INDEX_FILE = os.path.join(VECTOR_DB_DIR, "faiss_index.idx")
 DOCUMENT_CHUNKS_FILE = os.path.join(VECTOR_DB_DIR, "document_chunks.pkl")
 
+EXCEL_FILE = PROJECT_ROOT / "data" / "inputs" / "regular NBA.xlsx"  # Source de la base NBA
+
+# Base relationnelle construite depuis l'Excel. Rangée avec data/vector_db/ car
+# comme lui, elle est dérivée et entièrement régénérable (scripts/load_excel_to_db.py)
+# — donc gitignorée.
+NBA_DB_FILE = PROJECT_ROOT / "data" / "nba.db"
+NBA_DB_URL = f"sqlite:///{NBA_DB_FILE}"
+
+# Saison associée aux lignes de stats. HYPOTHÈSE DOCUMENTÉE : l'année n'apparaît
+# nulle part dans le fichier. Déduite de deux indices concordants — les 2485 points
+# de Shai Gilgeous-Alexander correspondent à son total 2024-25, et les PDF Reddit
+# sont datés du 12/06/2025 en commentant les playoffs 2025.
+SEASON = "2024-25"
+
 CHUNK_SIZE = 1500                   # Taille des chunks en *caractères* (vise ~512 tokens)
 CHUNK_OVERLAP = 150                 # Chevauchement en *caractères*
 EMBEDDING_BATCH_SIZE = 32           # Taille des lots pour l'API d'embedding
 
 # --- Configuration de la Recherche ---
 SEARCH_K = 5                        # Nombre de documents à récupérer par défaut
-
-# --- Configuration de la Base de Données ---
-DATABASE_DIR = "database"
-DATABASE_FILE = os.path.join(DATABASE_DIR, "interactions.db")
-DATABASE_URL = f"sqlite:///{DATABASE_FILE}" # URL pour SQLAlchemy
 
 # --- Configuration de l'Application ---
 APP_TITLE = "NBA Analyst AI"

@@ -26,3 +26,6 @@ Thumbs.db
 
 # Index vectoriel généré (régénérable via scripts/index.py)
 data/vector_db/
+
+# Base NBA générée depuis l Excel (régénérable via scripts/load_excel_to_db.py)
+data/nba.db
