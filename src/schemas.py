@@ -214,3 +214,21 @@ class RAGAnswer(BaseModel):
         description="Si abstain=True, explique brièvement pourquoi (donnée absente, "
         "question ambiguë, anomalie de données...).",
     )
+
+
+class AnswerWithSQL(RAGAnswer):
+    """RAGAnswer enrichie des requêtes SQL réellement exécutées pendant le run.
+
+    Sous-classe et non champ supplémentaire de RAGAnswer : le modèle reçoit le
+    JSON Schema de RAGAnswer (4 champs), donc il ne voit jamais sql_queries et ne
+    peut pas le remplir. Le code le renseigne après coup depuis la trace du tool.
+
+    Même raisonnement que pour l'absence de "grounded" : une requête auto-déclarée
+    par le modèle pourrait être inventée, alors qu'une requête lue dans la trace a
+    forcément été exécutée.
+    """
+
+    sql_queries: list[str] = Field(
+        default_factory=list,
+        description="Requêtes SQL exécutées par le tool, relevées par le code.",
+    )

@@ -43,6 +43,10 @@ testpaths = ["tests"]
 # Mistral) ni les tests "slow" (chargement réel du modèle OCR) : il faut les
 # demander explicitement.
 addopts = "-m 'not api and not slow'"
+# Les tests exercent des spans Logfire sans avoir appele logfire.configure() :
+# le warning est attendu ici. Filtre sur le message, la classe vivant dans un
+# module prive (logfire._internal).
+filterwarnings = ["ignore:No logs or spans will be created"]
 markers = [
     "api: tests appelant de vraies API externes payantes (Mistral) - lancer avec `pytest -m api`",
     "slow: tests chargeant un modèle lourd (EasyOCR) - lancer avec `pytest -m slow`",

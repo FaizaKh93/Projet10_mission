@@ -16,6 +16,7 @@ coûteux malgré son LIMIT, et un LIMIT ne borne pas le contenu d'une cellule.
 import logging
 import sqlite3
 import time
+from functools import lru_cache
 from pathlib import Path
 
 from langchain_community.utilities import SQLDatabase
@@ -107,6 +108,45 @@ def decrire_schema(url: str = NBA_DB_URL) -> str:
         "Les données ne contiennent aucune granularité par match : ni date, ni "
         "adversaire, ni indicateur domicile/extérieur. Les questions portant sur "
         "un match précis ou sur les N derniers matchs sont sans réponse possible."
+    )
+
+
+# Exemples few-shot montrant les tournures attendues : jointure obligatoire pour
+# obtenir un nom, LIMIT sur les classements, et lecture directe des colonnes _pct.
+EXEMPLES_SQL = """Exemples de questions et des requêtes correspondantes :
+
+Q : Combien de points Nikola Jokić a-t-il marqués cette saison ?
+SQL : SELECT s.pts_total FROM stats s JOIN players p USING (player_id)
+      WHERE p.full_name = 'Nikola Jokić';
+
+Q : Qui sont les 5 meilleurs marqueurs ?
+SQL : SELECT p.full_name, s.pts_total FROM stats s JOIN players p USING (player_id)
+      ORDER BY s.pts_total DESC LIMIT 5;
+
+Q : Combien de points les Detroit Pistons ont-ils marqués au total ?
+SQL : SELECT SUM(s.pts_total) AS points FROM stats s
+      JOIN teams t ON t.code = s.team_code WHERE t.name = 'Detroit Pistons';
+
+Q : Quel est le pourcentage au tir de Zach LaVine ?
+SQL : SELECT s.fg_pct FROM stats s JOIN players p USING (player_id)
+      WHERE p.full_name = 'Zach LaVine';
+      -- on lit fg_pct ; ne jamais le recalculer depuis fgm_total / fga_total"""
+
+
+@lru_cache(maxsize=1)
+def description_du_tool(url: str = NBA_DB_URL) -> str:
+    """Assemble la description du tool exposée au modèle : rôle, schéma, exemples.
+
+    Mise en cache et appelée au premier run, pas à l'import : la construire ouvre
+    la base, et `data/nba.db` peut ne pas exister au moment où le module est chargé.
+    """
+    return (
+        "Exécute une requête SQL de lecture sur la base NBA et renvoie ses lignes.\n"
+        "À utiliser pour TOUTE question chiffrée (total, moyenne, classement, "
+        "comparaison entre joueurs ou équipes) plutôt que de répondre de mémoire.\n\n"
+        + decrire_schema(url)
+        + "\n\n"
+        + EXEMPLES_SQL
     )
 
 

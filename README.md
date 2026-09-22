@@ -171,10 +171,46 @@ GROUP BY t.name ORDER BY points DESC;
 
 La consigne prévoit également `matches` et `reports`. `matches` **n'est pas constructible** : les sources ne contiennent aucune granularité par match (ni date, ni adversaire, ni identifiant de rencontre) — uniquement des agrégats de saison. C'est aussi ce qui rend les questions domicile/extérieur sans réponse calculable, conformément aux cas B1 et B2 du jeu de test. `reports` reste en attente d'une décision sur son contenu.
 
+## Tool SQL
+
+Les questions chiffrées ne passent plus par la recherche vectorielle seule : l'agent
+dispose d'un tool qui interroge directement la base. Il reçoit le schéma et quelques
+exemples de requêtes dans la description du tool, écrit le SQL, et le tool l'exécute.
+
+### Exécution : pourquoi pas le tool SQL de LangChain
+
+`SQLDatabase` de LangChain sert ici à **décrire** le schéma (`get_table_info()`), mais
+l'exécution passe par [`src/rag/sql_tool.py`](src/rag/sql_tool.py) et non par
+`QuerySQLDatabaseTool`. Ce dernier ouvre la base en lecture/écriture et exécute tel quel
+le SQL produit par le modèle, sans autoriseur ni délai d'exécution.
+
+C'est un modèle de langage qui écrit ces requêtes : la protection ne repose donc pas sur
+une inspection du texte, contournable, mais sur quatre barrières dont trois appliquées
+par SQLite lui-même.
+
+| Barrière | Mécanisme | Ce qu'elle arrête |
+|---|---|---|
+| Lecture seule | `file:...?mode=ro` | toute écriture, quelle que soit la requête |
+| Autoriseur | `set_authorizer` | PRAGMA, ATTACH, CTE récursives, `load_extension` |
+| Délai | `set_progress_handler` | produits cartésiens et requêtes qui n'aboutissent pas |
+| Limites de taille | `LIMIT` + `SQLITE_LIMIT_LENGTH` | résultats et valeurs qui satureraient le prompt |
+
+Une requête rejetée n'interrompt pas le run : son message remonte au modèle via
+`ModelRetry`, qui corrige sa requête et réessaie. Les messages distinguent donc les cas
+(« invalide : no such column » ≠ « refusée »), car c'est sur eux que le modèle se corrige.
+
+### Traçabilité
+
+`AnswerWithSQL.sql_queries` contient les requêtes **réellement exécutées**, relevées par
+le code dans la trace du run — jamais déclarées par le modèle. Une requête affichée dans
+l'interface ou enregistrée dans les résultats d'évaluation a donc forcément tourné sur la
+base. Même principe que `citations`, vérifiées en Python plutôt qu'auto-déclarées.
+
 ## État d'avancement
 
 - [x] Environnement reproductible (uv, Python 3.11)
 - [x] Prototype de référence testé et diagnostiqué
 - [x] Scripts du prototype repris et restructurés (`data/`, `scripts/`, `src/`, `app/`)
-- [ ] Architecture cible pour les questions analytiques
-- [ ] Implémentation
+- [x] Base relationnelle SQLite et pipeline d'ingestion
+- [x] Tool SQL sécurisé, branché à l'agent
+- [ ] Réévaluation RAGAS après ajout du tool
