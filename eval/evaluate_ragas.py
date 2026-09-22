@@ -165,6 +165,9 @@ def main(limit: int | None = None, label: str | None = None, force: bool = False
                     "abstain": rag_answer.abstain,
                     "abstain_reason": rag_answer.abstain_reason,
                     "citations": rag_answer.citations,
+                    # Requêtes réellement exécutées : permet d'analyser dans le notebook
+                    # si l'agent a utilisé le tool, et sur quelles questions.
+                    "sql_queries": rag_answer.sql_queries,
                     "faithfulness": f.value,
                     "context_precision": cp.value,
                     "context_recall": cr.value,

@@ -138,6 +138,50 @@ class Stat(Base):
     to_ratio: Mapped[float] = mapped_column(REAL, nullable=False)  # balles perdues par 100 possessions
 
 
+class Report(Base):
+    """Un document qualitatif source, un par fichier PDF (fils de discussion Reddit).
+
+    Représentation relationnelle des sources demandée par le cahier des charges.
+    Elle fait volontairement doublon avec l'index FAISS, qui contient les mêmes
+    textes découpés et vectorisés : c'est FAISS qui sert la recherche sémantique,
+    cette table ne sert qu'à exposer les sources sous forme relationnelle.
+    """
+
+    __tablename__ = "reports"
+    __table_args__ = STRICT
+
+    report_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    title: Mapped[str] = mapped_column(Text, nullable=False)  # sujet du fil, première ligne du document
+    source: Mapped[str] = mapped_column(Text, nullable=False)  # provenance : « Reddit »
+    file_name: Mapped[str] = mapped_column(Text, nullable=False, unique=True)  # fichier d'origine
+    content: Mapped[str] = mapped_column(Text, nullable=False)  # texte intégral extrait
+
+
+class Match(Base):
+    """Une rencontre. **Table modélisée mais jamais alimentée.**
+
+    Le cahier des charges demande de modéliser `matches`. Les sources ne le
+    permettent pas : le classeur ne contient que des agrégats de saison, sans
+    date, sans adversaire ni identifiant de rencontre (vérifié sur les 47
+    colonnes). Le schéma est donc posé pour montrer les clés attendues, et reste
+    vide — c'est aussi ce qui rend les questions domicile/extérieur sans réponse
+    calculable, conformément aux cas B1 et B2 du jeu de test.
+
+    Alimenter cette table exigerait une seconde source (calendrier ou box scores).
+    """
+
+    __tablename__ = "matches"
+    __table_args__ = STRICT
+
+    match_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    season: Mapped[str] = mapped_column(Text, nullable=False)  # ex. « 2024-25 »
+    played_on: Mapped[str] = mapped_column(Text, nullable=False)  # date ISO ; SQLite n'a pas de type DATE
+    home_team_code: Mapped[str] = mapped_column(Text, ForeignKey("teams.code"), nullable=False)
+    away_team_code: Mapped[str] = mapped_column(Text, ForeignKey("teams.code"), nullable=False)
+    home_points: Mapped[int] = mapped_column(Integer, nullable=False)
+    away_points: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
 def creer_engine(url: str, echo: bool = False):
     """Crée l'engine et active les clés étrangères sur CHAQUE connexion.
 

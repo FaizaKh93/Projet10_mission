@@ -158,6 +158,12 @@ if prompt := st.chat_input(f"Posez votre question sur la {NAME}..."):
                 st.warning(f"Réponse incertaine : {answer.abstain_reason or 'raison non précisée'}")
             if answer.citations:
                 st.caption(f"Sources citées (chunk_id) : {', '.join(answer.citations)}")
+            # Les requêtes viennent de la trace d'exécution, pas d'une déclaration
+            # du modèle : ce qui est affiché a forcément tourné sur la base.
+            if answer.sql_queries:
+                with st.expander(f"Requêtes SQL exécutées ({len(answer.sql_queries)})"):
+                    for requete in answer.sql_queries:
+                        st.code(requete, language="sql")
 
     # 5. Ajouter la réponse de l'assistant à l'historique (pour affichage UI)
     st.session_state.messages.append({"role": "assistant", "content": response_content})

@@ -100,6 +100,20 @@ class TeamRow(BaseModel):
     name: str = Field(min_length=3)
 
 
+class ReportRow(BaseModel):
+    """Un document qualitatif (PDF Reddit), avant insertion en base.
+
+    Réutilise le seuil de SourceDocument : une extraction qui rend moins de
+    caractères utiles a échoué, et insérer « \\nPage 1\\n » en base reviendrait à
+    enregistrer un échec d'OCR comme une source valide.
+    """
+
+    title: str = Field(min_length=3)
+    source: str = Field(min_length=2)
+    file_name: str = Field(min_length=3)
+    content: str = Field(min_length=MIN_CARACTERES_DOCUMENT)
+
+
 class PlayerRow(BaseModel):
     """Une ligne joueur de la feuille « Données NBA », avant insertion en base.
 
@@ -167,6 +181,22 @@ class PlayerRow(BaseModel):
         return self
 
 
+class SQLResult(BaseModel):
+    """Résultat d'une requête SQL exécutée par le tool, renvoyé à l'agent.
+
+    `truncated` signale que la requête renvoyait plus de lignes que la limite :
+    l'agent doit alors savoir que sa réponse porte sur un extrait, pas sur
+    l'ensemble — sinon il conclurait « il y a 50 joueurs » sur un LIMIT 50.
+    """
+
+    query: str
+    columns: list[str]
+    rows: list[dict]
+    row_count: int
+    truncated: bool = False
+    execution_ms: float
+
+
 class RAGAnswer(BaseModel):
     """Réponse structurée attendue du modèle, au lieu d'un texte libre.
 
@@ -197,4 +227,22 @@ class RAGAnswer(BaseModel):
         default=None,
         description="Si abstain=True, explique brièvement pourquoi (donnée absente, "
         "question ambiguë, anomalie de données...).",
+    )
+
+
+class AnswerWithSQL(RAGAnswer):
+    """RAGAnswer enrichie des requêtes SQL réellement exécutées pendant le run.
+
+    Sous-classe et non champ supplémentaire de RAGAnswer : le modèle reçoit le
+    JSON Schema de RAGAnswer (4 champs), donc il ne voit jamais sql_queries et ne
+    peut pas le remplir. Le code le renseigne après coup depuis la trace du tool.
+
+    Même raisonnement que pour l'absence de "grounded" : une requête auto-déclarée
+    par le modèle pourrait être inventée, alors qu'une requête lue dans la trace a
+    forcément été exécutée.
+    """
+
+    sql_queries: list[str] = Field(
+        default_factory=list,
+        description="Requêtes SQL exécutées par le tool, relevées par le code.",
     )
