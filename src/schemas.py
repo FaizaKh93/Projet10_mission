@@ -100,6 +100,20 @@ class TeamRow(BaseModel):
     name: str = Field(min_length=3)
 
 
+class ReportRow(BaseModel):
+    """Un document qualitatif (PDF Reddit), avant insertion en base.
+
+    Réutilise le seuil de SourceDocument : une extraction qui rend moins de
+    caractères utiles a échoué, et insérer « \\nPage 1\\n » en base reviendrait à
+    enregistrer un échec d'OCR comme une source valide.
+    """
+
+    title: str = Field(min_length=3)
+    source: str = Field(min_length=2)
+    file_name: str = Field(min_length=3)
+    content: str = Field(min_length=MIN_CARACTERES_DOCUMENT)
+
+
 class PlayerRow(BaseModel):
     """Une ligne joueur de la feuille « Données NBA », avant insertion en base.
 

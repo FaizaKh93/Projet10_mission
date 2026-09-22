@@ -191,6 +191,24 @@ def test_le_tool_est_enregistre_sur_agent():
 
 
 @pytest.mark.api
+def test_agent_appelle_le_tool_sur_une_question_chiffree():
+    """LE test de bout en bout : le LLM détecte-t-il une question chiffrée, appelle-t-il
+    le tool, et synthétise-t-il le résultat ?
+
+    Tous les autres tests appellent le tool directement, sans LLM : ils prouvent que
+    le tool fonctionne, pas que l'agent s'en sert. Si le modèle répondait de mémoire
+    sans appeler le tool, ils passeraient tous et la fonctionnalité serait inerte.
+
+    La question ne porte volontairement sur AUCUN chunk fourni : la réponse ne peut
+    venir que de la base.
+    """
+    answer = generate_answer([], "Quelle équipe a marqué le plus de points cette saison ?")
+    assert isinstance(answer, AnswerWithSQL)
+    assert answer.sql_queries, "l'agent n'a appelé le tool sur aucune requête"
+    assert "Detroit Pistons" in answer.answer  # valeur réelle de la base : 10292 points
+
+
+@pytest.mark.api
 def test_generate_answer_renvoie_une_sortie_structuree():
     """generate_answer() doit renvoyer un RAGAnswer validé, avec des citations
     qui référencent uniquement des chunks réellement fournis."""

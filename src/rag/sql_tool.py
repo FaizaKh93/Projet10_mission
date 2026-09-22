@@ -40,6 +40,17 @@ OPERATIONS_AUTORISEES = frozenset(
 # Ces trois-là sont déjà indisponibles ici : défense en profondeur.
 FONCTIONS_INTERDITES = frozenset({"load_extension", "readfile", "writefile"})
 
+# Tables présentes dans la base mais délibérément hors de portée du tool :
+# `reports` contient des documents de 14 à 56 Ko, qui satureraient le prompt, et
+# `matches` est vide — le modèle croirait pouvoir y répondre aux questions
+# domicile/extérieur au lieu de s'abstenir. Masquées à la fois dans la description
+# et à la lecture.
+#
+# Liste noire et non blanche, contrairement aux opérations : une CTE matérialisée
+# est relue via son alias (`WITH top AS (...) ... FROM top` déclenche une lecture
+# de « top »), qu'une liste blanche de vraies tables rejetterait à tort.
+TABLES_MASQUEES = frozenset({"reports", "matches"})
+
 
 class RequeteRefusee(Exception):
     """Requête refusée ou en échec. Le message est destiné à l'agent, qui peut
@@ -55,6 +66,8 @@ def _autoriseur(action: int, arg1, nom_fonction, nom_base, declencheur) -> int:
     """
     if action not in OPERATIONS_AUTORISEES:
         return sqlite3.SQLITE_DENY  # écriture, PRAGMA, ATTACH, CTE récursive...
+    if action == sqlite3.SQLITE_READ and (arg1 or "").casefold() in TABLES_MASQUEES:
+        return sqlite3.SQLITE_DENY  # arg1 = nom de la table lue
     if action == sqlite3.SQLITE_FUNCTION:
         # SQLite transmet le nom *enregistré*, donc déjà en minuscules
         if (nom_fonction or "").casefold() in FONCTIONS_INTERDITES:
@@ -82,14 +95,18 @@ def _ouvrir_connexion(chemin_base: Path) -> sqlite3.Connection:
 def decrire_schema(url: str = NBA_DB_URL) -> str:
     """Construit le texte de schéma à injecter dans le prompt de l'agent.
 
-    Assemble le DDL des tables et deux lignes d'exemple de chacune, puis y ajoute
-    à la main ce que le DDL ne dit pas : l'unité de chaque famille de colonnes,
-    l'écart entre les colonnes _pct et les totaux, et l'absence de toute donnée
-    match par match.
+    Assemble le DDL des tables statistiques et deux lignes d'exemple de chacune,
+    puis y ajoute à la main ce que le DDL ne dit pas : l'unité de chaque famille
+    de colonnes, l'écart entre les colonnes _pct et les totaux, et l'absence de
+    toute donnée match par match.
     """
     base = SQLDatabase.from_uri(url, sample_rows_in_table_info=2)  # DDL + 2 lignes par table
+    # Filtrage après réflexion, et non via ignore_tables : LangChain refuse une
+    # table absente de la base, ce qui ferait planter la description sur toute
+    # base ne contenant pas encore reports et matches.
+    tables = sorted(set(base.get_usable_table_names()) - TABLES_MASQUEES)
     return (
-        base.get_table_info()
+        base.get_table_info(table_names=tables)
         + "\n\n"
         + "Conventions de nommage des colonnes de `stats` :\n"
         "- suffixe _total     : agrégat de la SAISON (pts_total = 2485 pour SGA)\n"
@@ -130,7 +147,21 @@ SQL : SELECT SUM(s.pts_total) AS points FROM stats s
 Q : Quel est le pourcentage au tir de Zach LaVine ?
 SQL : SELECT s.fg_pct FROM stats s JOIN players p USING (player_id)
       WHERE p.full_name = 'Zach LaVine';
-      -- on lit fg_pct ; ne jamais le recalculer depuis fgm_total / fga_total"""
+      -- on lit fg_pct ; ne jamais le recalculer depuis fgm_total / fga_total
+
+Q : Qui a le meilleur pourcentage à trois points parmi les joueurs ayant tenté
+    plus de 300 tirs ?
+SQL : SELECT p.full_name, s.three_p_pct FROM stats s JOIN players p USING (player_id)
+      WHERE s.three_pa_total > 300 ORDER BY s.three_p_pct DESC LIMIT 1;
+      -- le seuil de volume va dans le WHERE, pas dans un filtre après coup
+
+Q : Quelles équipes comptent au moins 8 joueurs ayant disputé 40 matchs ou plus,
+    et combien de points ont-elles marqué ?
+SQL : SELECT t.name, COUNT(*) AS joueurs, SUM(s.pts_total) AS points
+      FROM stats s JOIN teams t ON t.code = s.team_code
+      WHERE s.games_played >= 40
+      GROUP BY t.name HAVING COUNT(*) >= 8 ORDER BY points DESC;
+      -- WHERE filtre les lignes, HAVING filtre les groupes"""
 
 
 @lru_cache(maxsize=1)

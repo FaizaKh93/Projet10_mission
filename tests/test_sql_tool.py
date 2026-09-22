@@ -15,7 +15,9 @@ from pathlib import Path
 import pytest
 
 from rag.sql_tool import (
+    description_du_tool,
     FONCTIONS_INTERDITES,
+    TABLES_MASQUEES,
     TAILLE_MAX_VALEUR,
     RequeteRefusee,
     executer_sql,
@@ -37,7 +39,10 @@ def base(tmp_path_factory):
         ) STRICT;
         INSERT INTO teams VALUES ('OKC','Oklahoma City Thunder'), ('DEN','Denver Nuggets');
         INSERT INTO players VALUES (1,'Shai Gilgeous-Alexander'), (2,'Nikola Jokic'), (3,'Jamal Murray');
+        CREATE TABLE reports (report_id INTEGER PRIMARY KEY, content TEXT) STRICT;
+        CREATE TABLE matches (match_id INTEGER PRIMARY KEY, played_on TEXT) STRICT;
         INSERT INTO stats VALUES (1,1,'OKC',2485,380,51.9), (2,2,'DEN',2072,889,57.6), (3,3,'DEN',1200,250,47.4);
+        INSERT INTO reports VALUES (1,'texte d''un fil Reddit');
         """
     )
     con.commit()
@@ -252,3 +257,50 @@ def test_fonction_interdite_insensible_a_la_casse():
     """Les noms de la liste doivent être en minuscules : SQLite transmet à
     l'autoriseur le nom *enregistré* de la fonction, toujours en minuscules."""
     assert all(nom == nom.casefold() for nom in FONCTIONS_INTERDITES)
+
+
+# --- Tables masquees ---
+
+
+@pytest.mark.parametrize(
+    "requete",
+    [
+        "SELECT content FROM reports",
+        "SELECT * FROM matches",
+        "SELECT r.content FROM stats s JOIN reports r ON 1=1",  # masquee via une jointure
+    ],
+)
+def test_tables_masquees_refusees(base, requete):
+    """`reports` et `matches` existent dans la base mais sont hors de portee du tool.
+
+    Ce n'est pas une question de securite - ce sont nos propres donnees - mais de
+    pertinence : les documents Reddit font 14 a 56 Ko et satureraient le prompt,
+    et `matches` etant vide, l'agent croirait pouvoir repondre aux questions
+    domicile/exterieur au lieu de s'abstenir.
+    """
+    with pytest.raises(RequeteRefusee, match="refus"):
+        executer_sql(requete, base)
+
+
+def test_cte_materialisee_reste_autorisee(base):
+    """Garde-fou contre un masquage trop strict.
+
+    Une CTE materialisee (ici par ORDER BY + LIMIT) est relue par SQLite via son
+    alias : l'autoriseur voit une lecture de « top ». Une liste blanche de vraies
+    tables la rejetterait a tort - d'ou le choix d'une liste noire.
+    """
+    resultat = executer_sql(
+        "WITH top AS (SELECT * FROM stats ORDER BY pts_total DESC LIMIT 2) "
+        "SELECT COUNT(*) AS n FROM top",
+        base,
+    )
+    assert resultat.rows == [{"n": 2}]
+
+
+def test_tables_masquees_absentes_de_la_description(base):
+    """Le modele ne doit pas voir ces tables : il ecrirait des requetes qui seront
+    refusees, ou pire, croirait pouvoir repondre depuis `matches`."""
+    description = description_du_tool(f"sqlite:///{base}")
+    assert "CREATE TABLE stats" in description
+    for masquee in TABLES_MASQUEES:
+        assert f"CREATE TABLE {masquee}" not in description

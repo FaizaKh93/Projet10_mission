@@ -173,8 +173,10 @@ def main(excel: Path, url: str, season: str) -> None:
     df_equipe.columns = ["code", "nom"]
 
     engine = creer_engine(url)
-    Base.metadata.drop_all(engine)  # régénération complète : la base est dérivée de l'Excel
-    Base.metadata.create_all(engine)
+    # On ne vide que les tables dérivées de l'Excel : un drop_all() effacerait aussi
+    # `reports`, alimentée par load_reports_to_db.py depuis une autre source.
+    Base.metadata.drop_all(engine, tables=[Stat.__table__, Player.__table__, Team.__table__])
+    Base.metadata.create_all(engine)  # crée au passage les tables encore absentes
 
     with Session(engine) as session:
         charger_equipes(df_equipe, session)

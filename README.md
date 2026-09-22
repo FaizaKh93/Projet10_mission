@@ -92,6 +92,8 @@ Construite depuis `regular NBA.xlsx` par `uv run python scripts/load_excel_to_db
 erDiagram
     TEAMS ||--o{ STATS : "joue pour"
     PLAYERS ||--o{ STATS : "realise"
+    TEAMS ||--o{ MATCHES : "recoit"
+    TEAMS ||--o{ MATCHES : "se deplace chez"
 
     TEAMS {
         TEXT code PK "code a 3 lettres comme OKC"
@@ -113,7 +115,25 @@ erDiagram
         REAL fg_pct "et 9 autres pourcentages"
         REAL offrtg "et 7 autres indices avances"
     }
+    MATCHES {
+        INTEGER match_id PK "table modelisee mais VIDE - voir plus bas"
+        TEXT season
+        TEXT played_on "date ISO - SQLite n a pas de type DATE"
+        TEXT home_team_code FK "vers teams"
+        TEXT away_team_code FK "vers teams"
+        INTEGER home_points
+        INTEGER away_points
+    }
+    REPORTS {
+        INTEGER report_id PK
+        TEXT title "sujet du fil de discussion"
+        TEXT source "Reddit"
+        TEXT file_name UK "fichier PDF d origine"
+        TEXT content "texte integral extrait"
+    }
 ```
+
+`REPORTS` n'a aucune clé étrangère : rien dans ces discussions ne se rattache de façon fiable à un joueur ou à une équipe identifiés. Les rattacher demanderait une extraction d'entités, qui introduirait ses propres erreurs.
 
 ### Les clés
 
@@ -141,7 +161,7 @@ C'est une précaution nécessaire : ces noms seront injectés dans le prompt du 
 ### Anomalies des données source, corrigées ou documentées
 
 - **Colonne `3PM`** : Excel a interprété l'en-tête comme l'horaire « 3 PM » et l'a stocké en `datetime.time(15, 0)`. Seul le nom était perdu — les valeurs sont intactes. Renommée à l'ingestion en `three_pm_total`, avec un contrôle permanent (`three_pm ≤ three_pa`) qui arrêterait l'ingestion si un futur export décalait les colonnes.
-- **Pourcentages** : `fg_pct` **n'est pas** `fgm_total / fga_total`. L'écart diminue quand le volume augmente, signature d'une moyenne des pourcentages match par match. Les deux valeurs sont justes, elles ne mesurent pas la même chose — à ne pas recalculer.
+- **Pourcentages** : `fg_pct` ne coïncide pas exactement avec `fgm_total / fga_total`, et la cause n'est **pas** établie. Mesuré sur les 566 joueurs : l'écart moyen tombe de 0,97 point (sous 100 tirs tentés) à 0,22 point (au-delà de 600), et SGA affiche 51,9 stocké contre 51,8 calculé. Mais l'incohérence est réelle chez les faibles volumes — Liam Robbins figure dans le fichier avec `FGM=3, FGA=8, FG%=25.0`, alors que 3/8 = 37,5 %. Testé et écarté : décalage de lignes (écart de 0,51 à décalage nul contre ~9 pour tout autre décalage), simple arrondi, erreur systématique de ±1. **La source est incohérente avec elle-même** sur les joueurs à faible temps de jeu ; `ft_pct` est le cas le plus marqué (318 joueurs sur 566 s'écartent de plus d'un point). On lit donc la colonne `_pct` telle quelle — c'est le pourcentage officiel publié — sans jamais la recalculer.
 - **Totaux dérivés** : ~95 % se reconstruisent par `round(moyenne par match, 1) × matchs joués`, d'où une imprécision d'environ 0,3 %.
 - **`reb_total` ≠ `oreb_total` + `dreb_total`** dans ce fichier.
 
@@ -167,9 +187,51 @@ FROM stats s JOIN teams t ON t.code = s.team_code
 GROUP BY t.name ORDER BY points DESC;
 ```
 
-### Tables non alimentées
+Agrégations multicritères — c'est là que le tool SQL apporte ce que la recherche vectorielle ne sait pas faire, un seuil de volume ne pouvant pas s'exprimer par similarité de texte :
 
-La consigne prévoit également `matches` et `reports`. `matches` **n'est pas constructible** : les sources ne contiennent aucune granularité par match (ni date, ni adversaire, ni identifiant de rencontre) — uniquement des agrégats de saison. C'est aussi ce qui rend les questions domicile/extérieur sans réponse calculable, conformément aux cas B1 et B2 du jeu de test. `reports` reste en attente d'une décision sur son contenu.
+```sql
+-- Meilleur pourcentage à trois points, à volume significatif
+-- (Zach LaVine, 44,6 % sur 533 tentatives)
+SELECT p.full_name, s.three_p_pct, s.three_pa_total
+FROM stats s JOIN players p USING (player_id)
+WHERE s.three_pa_total > 300
+ORDER BY s.three_p_pct DESC LIMIT 1;
+
+-- Équipes comptant au moins 8 joueurs à 40 matchs ou plus
+-- WHERE filtre les lignes, HAVING filtre les groupes
+SELECT t.name, COUNT(*) AS joueurs, SUM(s.pts_total) AS points
+FROM stats s JOIN teams t ON t.code = s.team_code
+WHERE s.games_played >= 40
+GROUP BY t.name HAVING COUNT(*) >= 8
+ORDER BY points DESC;
+```
+
+Les **comparaisons domicile/extérieur** que suggère la consigne ne sont pas calculables : voir `matches` ci-dessous.
+
+### `matches` : modélisée, volontairement vide
+
+La consigne demande de **modéliser** `matches`. Le schéma est donc posé avec ses clés (`home_team_code` et `away_team_code` vers `teams`), mais la table reste vide : aucune source ne permet de l'alimenter. Le classeur ne contient que des agrégats de saison — vérifié sur les 47 colonnes, il n'y a ni date, ni adversaire, ni identifiant de rencontre.
+
+C'est précisément ce qui rend les questions domicile/extérieur sans réponse calculable, conformément aux cas B1 et B2 du jeu de test : l'agent s'abstient au lieu d'inventer. Alimenter cette table exigerait une seconde source (calendrier officiel ou box scores).
+
+### `reports` : redondance assumée avec l'index vectoriel
+
+Alimentée par `uv run python scripts/load_reports_to_db.py`, une ligne par PDF Reddit.
+
+Ces fichiers sont des impressions navigateur, dont trois nécessitent un OCR. Le `title` est donc reconstitué par heuristique : la première ligne est la date d'impression, pas le sujet — c'est le bloc suivant, jusqu'aux éléments de navigation du site, qui porte le titre, parfois replié sur plusieurs lignes. Sur `Reddit 2.pdf`, l'OCR perd quelques mots de l'en-tête ; le titre reste reconnaissable mais approximatif.
+
+Cette table contient **les mêmes textes que l'index FAISS**, qui les stocke découpés en chunks et vectorisés. La duplication est volontaire : SQLite donne la représentation relationnelle des sources demandée par la modélisation, FAISS reste le mécanisme de recherche sémantique.
+
+### `reports` et `matches` sont masquées au tool SQL
+
+L'agent **ne peut pas** interroger ces deux tables : elles sont absentes de la description qu'il reçoit, et l'autoriseur refuse toute lecture qui les touche (`TABLES_MASQUEES` dans [`sql_tool.py`](src/rag/sql_tool.py)).
+
+Ce n'est pas une mesure de sécurité — ce sont nos propres données — mais de pertinence, pour deux raisons distinctes :
+
+- **`reports`** : un `WHERE content LIKE '%...%'` sur des documents de 14 à 56 Ko serait un substitut médiocre à la recherche par similarité, et une poignée de lignes saturerait le prompt. Les questions d'opinion passent par le RAG vectoriel, qui sait les traiter.
+- **`matches`** : elle est vide. Si l'agent la voyait, il écrirait une requête sur une question domicile/extérieur, obtiendrait zéro ligne et pourrait en tirer une conclusion erronée — alors que le comportement attendu est une abstention explicite.
+
+C'est une liste **noire** et non blanche, contrairement aux opérations autorisées. Une CTE matérialisée est relue par SQLite via son alias (`WITH top AS (...) ... FROM top` déclenche une lecture de « top ») : une liste blanche de vraies tables la rejetterait à tort.
 
 ## Tool SQL
 
@@ -211,6 +273,7 @@ base. Même principe que `citations`, vérifiées en Python plutôt qu'auto-déc
 - [x] Environnement reproductible (uv, Python 3.11)
 - [x] Prototype de référence testé et diagnostiqué
 - [x] Scripts du prototype repris et restructurés (`data/`, `scripts/`, `src/`, `app/`)
-- [x] Base relationnelle SQLite et pipeline d'ingestion
-- [x] Tool SQL sécurisé, branché à l'agent
+- [x] Base relationnelle SQLite (`players`, `stats`, `teams`, `reports`, `matches`)
+- [x] Pipelines d'ingestion : classeur Excel et documents qualitatifs
+- [x] Tool SQL sécurisé, branché à l'agent et vérifié de bout en bout
 - [ ] Réévaluation RAGAS après ajout du tool
