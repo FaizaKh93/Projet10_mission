@@ -167,6 +167,22 @@ class PlayerRow(BaseModel):
         return self
 
 
+class SQLResult(BaseModel):
+    """Résultat d'une requête SQL exécutée par le tool, renvoyé à l'agent.
+
+    `truncated` signale que la requête renvoyait plus de lignes que la limite :
+    l'agent doit alors savoir que sa réponse porte sur un extrait, pas sur
+    l'ensemble — sinon il conclurait « il y a 50 joueurs » sur un LIMIT 50.
+    """
+
+    query: str
+    columns: list[str]
+    rows: list[dict]
+    row_count: int
+    truncated: bool = False
+    execution_ms: float
+
+
 class RAGAnswer(BaseModel):
     """Réponse structurée attendue du modèle, au lieu d'un texte libre.
 
