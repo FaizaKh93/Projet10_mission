@@ -188,5 +188,71 @@
     "question": "Quelles équipes reviennent le plus souvent citées sur l'ensemble du fil de 15 pages de Reddit 1 (\"Who are teams in the playoffs that have impressed you?\") ?",
     "reference_answer": "Non fiable avec l'architecture actuelle : l'information existe potentiellement dans le corpus (répartie sur ~18 chunks pour ce seul PDF), mais un retrieval sémantique top-k ne garantit pas une couverture exhaustive nécessaire à un comptage global fiable.",
     "source": "Reddit 1.pdf — stress test d'exhaustivité du retrieval, pas une absence réelle d'info"
+  },
+  {
+    "id": "M1",
+    "categorie": "simple",
+    "modalite": "hybride",
+    "expected_behavior": "answer",
+    "evaluation_focus": "resolution_entite_inter_sources",
+    "question": "Dans le fil sur les équipes qui ont impressionné en playoffs, quel joueur des Pistons est salué pour son leadership ? Combien de points a-t-il marqués en saison régulière, et sur combien de matchs ?",
+    "reference_answer": "Cade Cunningham : 1827 points en 70 matchs.",
+    "source": "Reddit 1.pdf + Données NBA",
+    "note": "Le commentaire dit seulement « Cade », la base stocke « Cade Cunningham » : l'agent doit résoudre l'entité entre les deux sources avant de pouvoir requêter."
+  },
+  {
+    "id": "M2",
+    "categorie": "simple",
+    "modalite": "hybride",
+    "expected_behavior": "answer",
+    "evaluation_focus": "perimetre_statistique_distinct",
+    "question": "Un commentaire affirme que Jalen Brunson a tourné à 31 points par match en finale de conférence Est. Ce chiffre correspond-il à sa moyenne dans les données ?",
+    "reference_answer": "Non : 26,0 points par match en saison régulière (1690 points en 65 matchs). Les 31 cités concernent les playoffs, hors périmètre des données.",
+    "source": "Reddit 2.pdf + Données NBA",
+    "note": "Le chiffre Reddit est nécessaire au verdict, pas décoratif. Teste la distinction entre périmètre playoffs (cité) et saison régulière (calculé)."
+  },
+  {
+    "id": "M3",
+    "categorie": "complexe",
+    "modalite": "hybride",
+    "expected_behavior": "answer",
+    "evaluation_focus": "candidats_texte_puis_agregation",
+    "question": "Quelle affiche de finale est évoquée à plusieurs reprises dans le fil comme peu attrayante ? Des deux équipes concernées, laquelle a le plus haut total de points en saison régulière ?",
+    "reference_answer": "Timberwolves–Pacers. Indiana Pacers avec 9630 points, devant les Minnesota Timberwolves (9523).",
+    "source": "Reddit 1.pdf + Données NBA",
+    "note": "Les deux candidats viennent du texte, la comparaison du SQL. Thème récurrent du fil, donc récupérable sans exiger l'exhaustivité que B6 teste déjà."
+  },
+  {
+    "id": "M4",
+    "categorie": "complexe",
+    "modalite": "hybride",
+    "expected_behavior": "answer",
+    "evaluation_focus": "classement_global_apres_identification",
+    "question": "Un commentaire cite deux jeunes joueurs comme des « mature difference makers ». Lequel des deux a distribué le plus de passes décisives en saison régulière, et à quel rang de la ligue cela le place-t-il ?",
+    "reference_answer": "Paolo Banchero et Cade Cunningham. Cade Cunningham avec 637 passes décisives, 5e de la ligue (Banchero : 221).",
+    "source": "Reddit 1.pdf + Données NBA",
+    "note": "Identification par le texte, puis classement sur les 569 lignes : un retrieval top-k ne peut pas établir un rang."
+  },
+  {
+    "id": "M5",
+    "categorie": "bruitee",
+    "modalite": "hybride",
+    "expected_behavior": "abstain_absence",
+    "evaluation_focus": "conflit_presence_inter_sources",
+    "question": "D'après les données statistiques, combien de points Reggie Miller a-t-il marqués cette saison ?",
+    "reference_answer": "Impossible à répondre : Reggie Miller est un joueur retraité, longuement discuté dans les documents Reddit mais absent de la base (seuls Brandon, Jordan, Leonard et Emanuel Miller y figurent).",
+    "source": "Reddit 3.pdf + Données NBA",
+    "note": "Miroir de B4 : le nom sature les documents récupérés alors qu'il n'existe pas dans les données structurées. Le tool SQL rend ce cas nouvellement dangereux, puisqu'une requête sur '%Miller%' renverrait des homónymes."
+  },
+  {
+    "id": "M6",
+    "categorie": "bruitee",
+    "modalite": "hybride",
+    "expected_behavior": "abstain_absence",
+    "evaluation_focus": "absence_perimetre_playoffs",
+    "question": "Combien de points les Pacers ont-ils marqués lors de leur série de playoffs contre les Knicks ?",
+    "reference_answer": "Impossible à répondre : la base ne couvre que la saison régulière et ne contient aucune granularité par match, par série ni par adversaire.",
+    "source": "Reddit 1.pdf + Données NBA",
+    "note": "Le piège central du projet : les fils Reddit parlent tous de playoffs, la base ne couvre que la saison régulière. Teste le biais de mapping NL vers SQL."
   }
 ]

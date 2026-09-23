@@ -51,6 +51,9 @@ class TraceSQL:
     `deps` : deux appels simultanés ne mélangent pas leurs traces."""
 
     resultats: list[SQLResult] = field(default_factory=list)
+    # Texte exact renvoyé au modèle, conservé tel quel : c'est ce sur quoi la
+    # réponse s'appuie, donc ce qu'une évaluation de fidélité doit examiner.
+    textes: list[str] = field(default_factory=list)
 
 
 agent = Agent(
@@ -86,8 +89,10 @@ def interroger_base_nba(ctx: RunContext[TraceSQL], requete: str) -> str:
         span.set_attribute("sql.execution_ms", resultat.execution_ms)
         span.set_attribute("sql.truncated", resultat.truncated)
 
+    texte = _formater_resultat(resultat)
     ctx.deps.resultats.append(resultat)
-    return _formater_resultat(resultat)
+    ctx.deps.textes.append(texte)
+    return texte
 
 
 def _formater_resultat(resultat: SQLResult) -> str:
@@ -149,4 +154,5 @@ def generate_answer(search_results: list[SearchResult], question: str) -> Answer
     return AnswerWithSQL(
         **answer.model_dump(),
         sql_queries=[r.query for r in trace.resultats],
+        sql_results=trace.textes,
     )

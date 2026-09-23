@@ -8,6 +8,9 @@ le biais d'auto-évaluation).
 import argparse
 import json
 import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeout
 from datetime import datetime
 from pathlib import Path
 
@@ -67,10 +70,86 @@ def query_prototype(vector_store_manager: VectorStoreManager, question: str):
 
     # contexts = juste le texte des chunks (sans les métadonnées), c'est ce format que RAGAS attend
     contexts = [res.text for res in search_results]
-    return contexts, answer, rag_answer
+
+    contexts_complets = contexts + provenance_sql(rag_answer.sql_queries, rag_answer.sql_results)
+    return contexts, contexts_complets, answer, rag_answer
 
 
-def main(limit: int | None = None, label: str | None = None, force: bool = False):
+def provenance_sql(requetes: list[str], resultats: list[str]) -> list[str]:
+    """Apparie chaque requête à son résultat, pour le contexte de faithfulness.
+
+    Le résultat seul ne suffit pas : `pts_total / 2072` ne dit pas de QUI il s'agit,
+    alors que la requête porte `WHERE p.full_name = 'Nikola Jokić'`. De même, « c'est
+    le plus élevé » n'est justifiable que si le juge voit le `ORDER BY ... DESC LIMIT 1`.
+    C'est le couple requête + résultat qui constitue la provenance d'un fait SQL.
+
+    Cela ne rend pas la mesure complaisante : une requête qui somme la saison entière
+    ne justifiera toujours pas une affirmation portant sur une série de playoffs.
+    """
+    return [
+        f"Requête SQL exécutée :\n{requete}\n\nRésultat renvoyé :\n{resultat}"
+        for requete, resultat in zip(requetes, resultats)
+    ]
+
+
+def interroger_avec_delai(vector_store_manager, question: str, delai: float):
+    """Interroge le système en abandonnant au-delà de `delai` secondes.
+
+    Garde-fou du HARNAIS, pas du système : l'agent garde sa configuration
+    d'origine, on refuse seulement d'attendre indéfiniment (le run précédent a
+    perdu C4 sur un blocage de 5 minutes côté Mistral).
+
+    Python ne peut pas tuer un thread : l'appel abandonné continue en arrière-plan
+    jusqu'à son terme. On enregistre l'incident et on passe au cas suivant.
+    """
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        futur = executor.submit(query_prototype, vector_store_manager, question)
+        try:
+            return futur.result(timeout=delai)
+        except FuturesTimeout as e:
+            raise TimeoutError(f"génération abandonnée après {delai} s") from e
+
+
+def recalculer_faithfulness(chemin: Path, faithfulness, pause: float) -> None:
+    """Renote la seule faithfulness d'un run existant, sans rien regénérer.
+
+    Sert quand la définition du CONTEXTE change alors que le système évalué, lui,
+    n'a pas bougé : question, réponse notée, chunks, requêtes SQL et résultats sont
+    déjà dans le fichier. Économie réelle : zéro appel Mistral, et une métrique
+    jugée au lieu de quatre.
+
+    Les trois autres métriques sont laissées intactes : elles ne dépendent pas du
+    contexte élargi (voir le commentaire de chaque métrique dans main()).
+    """
+    if not chemin.exists():
+        raise FileNotFoundError(f"{chemin} introuvable : lancer d'abord un run complet.")
+
+    cas = json.loads(chemin.read_text(encoding="utf-8"))
+    notes = [c for c in cas if "error" not in c]
+
+    for i, c in enumerate(notes, 1):
+        contexte = c["retrieved_contexts"] + provenance_sql(
+            c.get("sql_queries") or [], c.get("sql_results") or []
+        )
+        ancien = c.get("faithfulness")
+        try:
+            c["faithfulness"] = faithfulness.score(
+                user_input=c["question"], response=c["system_response"], retrieved_contexts=contexte
+            ).value
+            print(f"[{i}/{len(notes)}] {c['id']:3} {ancien:.2f} -> {c['faithfulness']:.2f}")
+        except Exception as e:
+            # On conserve l'ancienne note plutôt que de laisser un trou dans le fichier
+            print(f"[{i}/{len(notes)}] {c['id']:3} ÉCHEC, note conservée : {str(e)[:70]}")
+
+        chemin.write_text(json.dumps(cas, ensure_ascii=False, indent=2), encoding="utf-8")
+        if pause and i < len(notes):
+            time.sleep(pause)
+
+    print(f"\n{chemin} mis à jour.")
+
+
+def main(limit: int | None = None, label: str | None = None, force: bool = False,
+         pause: float = 5.0, delai_cas: float = 120.0, rescore: bool = False):
     # Nom de fichier explicite (ex. "baseline") ou, à défaut, un horodatage — jamais un nom fixe,
     # pour ne jamais écraser un run précédent (ex. la baseline) par erreur.
     label = label or datetime.now().strftime("run_%Y%m%d_%H%M%S")
@@ -78,8 +157,9 @@ def main(limit: int | None = None, label: str | None = None, force: bool = False
     results_dir.mkdir(exist_ok=True)
     out_path = results_dir / f"{label}.json"
 
-    # Garde-fou : refuse d'écraser un fichier de résultats existant sauf si --force est passé explicitement
-    if out_path.exists() and not force:
+    # Garde-fou : refuse d'écraser un fichier de résultats existant sauf si --force est passé explicitement.
+    # Ne s'applique pas à --rescore, dont le principe est justement de réécrire un run existant.
+    if out_path.exists() and not force and not rescore:
         raise FileExistsError(
             f"{out_path} existe déjà. Choisissez un autre --label, ou passez --force pour écraser volontairement."
         )
@@ -89,6 +169,14 @@ def main(limit: int | None = None, label: str | None = None, force: bool = False
     testset = json.loads(testset_path.read_text(encoding="utf-8"))
     if limit:
         testset = testset[:limit]  # utile pour tester sur 2-3 cas avant de lancer les 18
+
+    # --rescore : on ne regenere rien. Tout ce dont le juge a besoin est deja dans le
+    # fichier de resultats, donc ni FAISS ni Mistral ne sont charges.
+    if rescore:
+        openai_client = AsyncOpenAI()
+        judge_llm = llm_factory("gpt-4o", client=openai_client, max_tokens=8192)
+        recalculer_faithfulness(out_path, Faithfulness(llm=judge_llm), pause)
+        return
 
     print(f"Chargement du VectorStoreManager (système évalué)...")
     vector_store_manager = VectorStoreManager()  # charge l'index FAISS + les 302 chunks depuis data/vector_db/
@@ -118,11 +206,21 @@ def main(limit: int | None = None, label: str | None = None, force: bool = False
         # cas précédents. On enregistre l'erreur pour ce cas et on continue avec le suivant.
         try:
             # Interroge le système évalué (retrieval + génération via l'agent) — voir query_prototype() plus haut
-            contexts, answer, rag_answer = query_prototype(vector_store_manager, case["question"])
+            contexts, contexts_complets, answer, rag_answer = interroger_avec_delai(
+                vector_store_manager, case["question"], delai_cas
+            )
 
-            # Métrique 1 - Faithfulness : la réponse invente-t-elle des faits absents du contexte récupéré
-            # (hallucination) ? Compare chaque affirmation de `response` à ce qui est réellement dans `contexts`.
-            f = faithfulness.score(user_input=case["question"], response=answer, retrieved_contexts=contexts)
+            # Métrique 1 - Faithfulness : la réponse invente-t-elle des faits absents du contexte
+            # (hallucination) ? Seule métrique nourrie par `contexts_complets` : elle juge la réponse
+            # au regard de TOUT ce dont le système disposait, chunks vectoriels ET résultats SQL.
+            f = faithfulness.score(
+                user_input=case["question"], response=answer, retrieved_contexts=contexts_complets
+            )
+
+            # Les trois métriques suivantes gardent `contexts` (chunks seuls) : elles mesurent la
+            # qualité du RETRIEVAL, pas celle de la réponse. Y ajouter les résultats SQL gonflerait
+            # mécaniquement la précision et ferait perdre la comparabilité avec baseline et
+            # validation_pydantic, où context_precision sert de témoin du protocole.
 
             # Métrique 2 - Context Precision : les chunks récupérés sont-ils pertinents par rapport à ce qu'il
             # fallait retrouver ? Ne regarde PAS la réponse générée, seulement `contexts` vs `reference`.
@@ -168,6 +266,9 @@ def main(limit: int | None = None, label: str | None = None, force: bool = False
                     # Requêtes réellement exécutées : permet d'analyser dans le notebook
                     # si l'agent a utilisé le tool, et sur quelles questions.
                     "sql_queries": rag_answer.sql_queries,
+                    # Ce que la base a renvoyé : c'est la part du contexte jugée par la
+                    # faithfulness, donc nécessaire pour relire un score a posteriori.
+                    "sql_results": rag_answer.sql_results,
                     "faithfulness": f.value,
                     "context_precision": cp.value,
                     "context_recall": cr.value,
@@ -182,6 +283,12 @@ def main(limit: int | None = None, label: str | None = None, force: bool = False
         # les 14 premiers restent sur disque au lieu d'être perdus.
         out_path.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
 
+        # Pause entre les cas : gpt-4o est plafonné à 30 000 tokens/minute et un seul cas
+        # consomme une vingtaine d'appels de juge. Sans elle, le run précédent a perdu
+        # B6 et M2 sur des 429, après épuisement des tentatives internes de RAGAS.
+        if pause and i < len(testset):
+            time.sleep(pause)
+
     print(f"\nRésultats sauvegardés dans {out_path}")
 
 
@@ -193,5 +300,14 @@ if __name__ == "__main__":
     parser.add_argument("--label", type=str, default=None, help="Nom du run (défaut : horodatage automatique)")
     # --force : autorise explicitement à écraser un fichier de résultats existant portant le même label
     parser.add_argument("--force", action="store_true", help="Écraser un résultat existant portant le même label")
+    # --pause : secondes d'attente entre deux cas, pour rester sous la limite de tokens/minute du juge
+    parser.add_argument("--pause", type=float, default=5.0, help="Pause entre deux cas en secondes (défaut : 5)")
+    # --delai-cas : abandon d'un cas dont la génération s'éternise, sans toucher à la config de l'agent
+    parser.add_argument("--delai-cas", type=float, default=120.0, help="Délai maximal de génération par cas (défaut : 120 s)")
+    # --rescore-faithfulness : renote CETTE SEULE metrique sur un run existant, sans regenerer
+    # les reponses. Nom explicite : les trois autres metriques restent telles quelles.
+    parser.add_argument("--rescore-faithfulness", action="store_true",
+                        help="Recalculer la seule faithfulness d'un run existant")
     args = parser.parse_args()
-    main(limit=args.limit, label=args.label, force=args.force)
+    main(limit=args.limit, label=args.label, force=args.force, pause=args.pause,
+         delai_cas=args.delai_cas, rescore=args.rescore_faithfulness)
