@@ -139,6 +139,19 @@ def test_tool_leve_model_retry_avec_un_message_exploitable(tool_sur_base, requet
         interroger_base_nba(_contexte(TraceSQL()), requete)
 
 
+def test_tool_conserve_le_texte_renvoye_au_modele(tool_sur_base):
+    """La trace garde le texte exact remis au modèle, pas seulement la requête.
+
+    C'est cette part du contexte que l'évaluation doit juger : sans elle, une
+    réponse exacte tirée de la base est notée comme non fondée, faute de support
+    dans les chunks vectoriels.
+    """
+    trace = TraceSQL()
+    renvoye = interroger_base_nba(_contexte(trace), "SELECT pts_total FROM stats WHERE player_id = 1")
+    assert trace.textes == [renvoye]
+    assert "2072" in trace.textes[0]
+
+
 def test_tool_echoue_ne_pollue_pas_la_trace(tool_sur_base):
     """Une requête refusée n'a rien exécuté : elle ne doit pas apparaître dans
     sql_queries, sinon la traçabilité mentirait."""

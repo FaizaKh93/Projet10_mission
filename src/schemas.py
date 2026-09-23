@@ -246,3 +246,9 @@ class AnswerWithSQL(RAGAnswer):
         default_factory=list,
         description="Requêtes SQL exécutées par le tool, relevées par le code.",
     )
+    sql_results: list[str] = Field(
+        default_factory=list,
+        description="Ce que le tool a renvoyé au modèle, mot pour mot. C'est la "
+        "partie du contexte qui vient de la base : sans elle, une évaluation de "
+        "fidélité jugerait la réponse sur les seuls chunks vectoriels.",
+    )
