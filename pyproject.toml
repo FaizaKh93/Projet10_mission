@@ -8,7 +8,6 @@ dependencies = [
     "easyocr>=1.7.2",
     "faiss-cpu==1.10.0",
     "langchain==0.3.23",
-    "langchain-openai>=0.3.35",
     "logfire>=5.0",
     "mistralai>=1.9.11",
     "openpyxl==3.1.5",
@@ -23,7 +22,6 @@ dependencies = [
     "ragas>=0.4.3",
     "requests==2.32.3",
     "streamlit==1.44.1",
-    "streamlit-feedback==0.1.4",
     "tqdm>=4.70.1",
     "truststore>=0.10.4",
 ]

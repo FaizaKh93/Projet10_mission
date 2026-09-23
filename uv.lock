@@ -3837,7 +3837,6 @@ dependencies = [
     { name = "easyocr" },
     { name = "faiss-cpu" },
     { name = "langchain" },
-    { name = "langchain-openai" },
     { name = "logfire" },
     { name = "mistralai" },
     { name = "openpyxl" },
@@ -3852,7 +3851,6 @@ dependencies = [
     { name = "ragas" },
     { name = "requests" },
     { name = "streamlit" },
-    { name = "streamlit-feedback" },
     { name = "tqdm" },
     { name = "truststore" },
 ]
@@ -3871,7 +3869,6 @@ requires-dist = [
     { name = "easyocr", specifier = ">=1.7.2" },
     { name = "faiss-cpu", specifier = "==1.10.0" },
     { name = "langchain", specifier = "==0.3.23" },
-    { name = "langchain-openai", specifier = ">=0.3.35" },
     { name = "logfire", specifier = ">=5.0" },
     { name = "mistralai", specifier = ">=1.9.11" },
     { name = "openpyxl", specifier = "==3.1.5" },
@@ -3886,7 +3883,6 @@ requires-dist = [
     { name = "ragas", specifier = ">=0.4.3" },
     { name = "requests", specifier = "==2.32.3" },
     { name = "streamlit", specifier = "==1.44.1" },
-    { name = "streamlit-feedback", specifier = "==0.1.4" },
     { name = "tqdm", specifier = ">=4.70.1" },
     { name = "truststore", specifier = ">=0.10.4" },
 ]
@@ -5607,18 +5603,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/3e/c0/7286284567e5045f0c587c426d0c41aee5d10c0a2e360e627a83037e9f0c/streamlit-1.44.1.tar.gz", hash = "sha256:c6914ed6d5b76870b461510476806db370f36425ae0e6654d227c988288198d3", size = 9423685, upload-time = "2025-04-01T20:36:19.91Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/eb/17/fc425e1d4d86e31b2aaf0812a2ef2163763a0670d671720c7c36e8679323/streamlit-1.44.1-py3-none-any.whl", hash = "sha256:9fe355f58b11f4eb71e74f115ce1f38c4c9eaff2733e6bcffb510ac1298a5990", size = 9812242, upload-time = "2025-04-01T20:36:16.785Z" },
-]
-
-[[package]]
-name = "streamlit-feedback"
-version = "0.1.4"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "streamlit" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/e0/2f/56c1b43a8b5e442248366094699dc74f4fdbcfb84c3b74764562dabb94b9/streamlit-feedback-0.1.4.tar.gz", hash = "sha256:4c34429aaea308cbf902bb353260600ecab6f455bc60faf34b8083492523aa8b", size = 741285, upload-time = "2025-01-13T08:33:10.14Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/5a/e4/67fda9a746aa4d1684dfef7747e9968cc1fb36832cc686dd3276fc4d8bd5/streamlit_feedback-0.1.4-py3-none-any.whl", hash = "sha256:8e760b16ecaf2f7024f277fe6bc94da63e87a132643ecfc462666c4524a3f5b4", size = 5684699, upload-time = "2025-01-13T08:33:04.766Z" },
 ]
 
 [[package]]
