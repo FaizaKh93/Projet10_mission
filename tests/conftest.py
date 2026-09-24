@@ -4,12 +4,19 @@ import sys
 from pathlib import Path
 
 import truststore
+from dotenv import load_dotenv
 
 truststore.inject_into_ssl()  # même fix TLS proxy que le reste du projet
 
 # Rend le package src/ importable (config.py, rag/vector_store.py), comme dans
 # scripts/index.py et eval/evaluate_ragas.py
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+
+# Chargé ici et pas seulement via config.py : le hook ci-dessous lit MISTRAL_API_KEY
+# dès la collecte, avant qu'un test ait importé config. Sans ça, le skip dépendait
+# d'un effet de bord — test_generation.py importe rag.generation au niveau module,
+# test_compatibilite.py non : lancé seul, il se sautait lui-même.
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 
 # pytest_collection_modifyitems : hook spécial que pytest appelle automatiquement

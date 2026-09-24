@@ -12,8 +12,9 @@ from pydantic_ai.settings import ModelSettings
 from pydantic_ai.tools import ToolDefinition
 
 from config import MISTRAL_API_KEY, MODEL_NAME
+from rag.compatibilite import Decision, valider_intention
 from rag.sql_tool import RequeteRefusee, description_du_tool, executer_sql
-from schemas import AnswerWithSQL, RAGAnswer, SearchResult, SQLResult
+from schemas import AnswerWithSQL, IntentionSQL, RAGAnswer, SearchResult, SQLResult
 
 # Prompt repris MOT POUR MOT du prototype d'origine (app/chat.py et eval/evaluate_ragas.py),
 # volontairement non modifié : cette étape mesure l'effet de la couche Pydantic AI seule,
@@ -37,14 +38,40 @@ RÉPONSE DE L'ANALYSTE NBA:"""
 # passe toujours la clé explicitement
 _model = MistralModel(MODEL_NAME, provider=MistralProvider(api_key=MISTRAL_API_KEY))
 
-# output_type=RAGAnswer : force une sortie structurée validée par Pydantic plutôt
-# qu'un texte libre (voir schemas.py) - construit une seule fois, réutilisé à chaque appel.
-# On ne passe pas le paramètre system_prompt de l'Agent : comme le prototype d'origine,
-# tout le template (persona + contexte + question) part dans un unique message user.
-# D'où le nom SYSTEM_PROMPT conservé tel quel - c'est celui du prototype, même contenu.
-# temperature=0.1 : valeur du prototype d'origine, reprise telle quelle (sans ça,
-# l'agent utiliserait la valeur par défaut de Mistral et on introduirait une
-# différence de comportement non voulue par rapport à la baseline).
+# Le modèle décrit la demande, le code tranche (rag/compatibilite.py) — comme
+# l'autoriseur SQLite refuse les écritures sans consulter le modèle. 
+PROMPT_INTENTION = """Décris ce que cette question demande À LA BASE DE DONNÉES statistiques.
+
+Ne décris PAS ce que la question mentionne : décris ce qu'il faudrait aller chercher
+dans une base de statistiques pour y répondre. Si la réponse se trouve entièrement
+dans des documents textuels, la base n'est pas sollicitée.
+
+QUESTION : {question}"""
+
+agent_intention = Agent(
+    model=_model,
+    output_type=IntentionSQL,
+    model_settings=ModelSettings(temperature=0.0),  # une classification, pas une rédaction
+)
+
+
+def analyser_couverture(question: str) -> Decision:
+    """Extrait l'intention puis la confronte au schéma. Un appel LLM par question.
+
+    Si l'extraction échoue, le SQL reste disponible : un garde-fou en panne ne doit
+    pas priver le système de sa base.
+    """
+    try:
+        intention = agent_intention.run_sync(PROMPT_INTENTION.format(question=question)).output
+    except Exception as e:
+        logging.warning(f"Extraction d'intention impossible, SQL laissé disponible : {e}")
+        return valider_intention(IntentionSQL(base_sollicitee=True))
+
+    decision = valider_intention(intention)
+    logging.info(f"Couverture : {decision.verdict.value} — {decision.detail()}")
+    return decision
+
+
 @dataclass
 class TraceSQL:
     """Requêtes exécutées pendant un run. Une instance neuve par appel, passée en
@@ -54,8 +81,18 @@ class TraceSQL:
     # Texte exact renvoyé au modèle, conservé tel quel : c'est ce sur quoi la
     # réponse s'appuie, donc ce qu'une évaluation de fidélité doit examiner.
     textes: list[str] = field(default_factory=list)
+    # Lu par le hook `prepare` ; None = pas de validation (comportement d'origine)
+    decision: Decision | None = None
 
 
+# output_type=RAGAnswer : force une sortie structurée validée par Pydantic plutôt
+# qu'un texte libre (voir schemas.py) - construit une seule fois, réutilisé à chaque appel.
+# On ne passe pas le paramètre system_prompt de l'Agent : comme le prototype d'origine,
+# tout le template (persona + contexte + question) part dans un unique message user.
+# D'où le nom SYSTEM_PROMPT conservé tel quel - c'est celui du prototype, même contenu.
+# temperature=0.1 : valeur du prototype d'origine, reprise telle quelle (sans ça,
+# l'agent utiliserait la valeur par défaut de Mistral et on introduirait une
+# différence de comportement non voulue par rapport à la baseline).
 agent = Agent(
     model=_model,
     output_type=RAGAnswer,
@@ -64,13 +101,18 @@ agent = Agent(
 )
 
 
-def _injecter_schema(ctx: RunContext[TraceSQL], tool_def: ToolDefinition) -> ToolDefinition:
-    """Pose la description du tool au moment du run plutôt qu'à l'import.
+def _injecter_schema(ctx: RunContext[TraceSQL], tool_def: ToolDefinition) -> ToolDefinition | None:
+    """Décide si le tool existe pour ce run, et pose sa description.
 
-    Appelée par Pydantic AI avant chaque run. Le décorateur évaluerait
-    `description=` à l'import, ce qui exigerait que `data/nba.db` existe dès le
-    chargement du module.
+    Renvoyer None **retire le tool** : le code le supprime, il ne demande pas au
+    modèle de s'abstenir. Le retour anticipé évite d'ouvrir la base pour rien.
+
+    Appelée avant chaque run ; le décorateur évaluerait `description=` à l'import,
+    ce qui exigerait que `data/nba.db` existe dès le chargement du module.
     """
+    decision = ctx.deps.decision
+    if decision is not None and not decision.sql_autorise:
+        return None
     return replace(tool_def, description=description_du_tool())
 
 
@@ -146,7 +188,9 @@ def generate_answer(search_results: list[SearchResult], question: str) -> Answer
     # Même assemblage que le prototype d'origine : le template complet dans un seul message
     user_prompt = SYSTEM_PROMPT.format(context_str=context_str, question=question)
 
-    trace = TraceSQL()
+    # Si la base ne sait pas exprimer une dimension demandée, le tool ne sera pas
+    # proposé à l'agent (cf. _injecter_schema)
+    trace = TraceSQL(decision=analyser_couverture(question))
     result = agent.run_sync(user_prompt, deps=trace)
     answer = verify_citations(result.output, search_results)
 

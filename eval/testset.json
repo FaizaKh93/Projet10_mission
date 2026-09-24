@@ -195,8 +195,8 @@
     "modalite": "hybride",
     "expected_behavior": "answer",
     "evaluation_focus": "resolution_entite_inter_sources",
-    "question": "Dans le fil sur les équipes qui ont impressionné en playoffs, quel joueur des Pistons est salué pour son leadership ? Combien de points a-t-il marqués en saison régulière, et sur combien de matchs ?",
-    "reference_answer": "Cade Cunningham : 1827 points en 70 matchs.",
+    "question": "Dans les commentaires sur les playoffs, quel joueur des Pistons est salué pour son leadership ? Combien de points a-t-il marqués en saison régulière ?",
+    "reference_answer": "Cade Cunningham : 1827 points en saison régulière.",
     "source": "Reddit 1.pdf + Données NBA",
     "note": "Le commentaire dit seulement « Cade », la base stocke « Cade Cunningham » : l'agent doit résoudre l'entité entre les deux sources avant de pouvoir requêter."
   },
