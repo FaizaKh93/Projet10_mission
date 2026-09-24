@@ -27,12 +27,14 @@ def vector_store():
 
 
 def test_query_prototype(vector_store):
-    """query_prototype() renvoie maintenant un triplet : les textes des chunks (pour
-    RAGAS), la réponse telle que vue par l'utilisateur, et l'objet RAGAnswer complet
-    (pour l'analyse comportementale)."""
-    contexts, answer, rag_answer = query_prototype(
+    """query_prototype() renvoie 4 valeurs : les chunks, les chunks élargis à la
+    provenance SQL (jugés par la faithfulness seule), la réponse vue par
+    l'utilisateur, et le RAGAnswer complet."""
+    contexts, contexts_complets, answer, rag_answer = query_prototype(
         vector_store, "Combien de points Nikola Jokić a-t-il marqués ?"
     )
+    # Le contexte élargi contient au moins les chunks, plus la provenance SQL s'il y en a
+    assert len(contexts_complets) >= len(contexts)
     # contexts = liste des textes des chunks récupérés (peut être vide, mais jamais None)
     assert isinstance(contexts, list)
     # answer = chaîne envoyée au juge RAGAS, ne doit jamais être vide

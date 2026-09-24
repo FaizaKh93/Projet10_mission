@@ -24,8 +24,9 @@ from rag.generation import (
     interroger_base_nba,
     verify_citations,
 )
+from rag.compatibilite import valider_intention
 from rag.sql_tool import description_du_tool, executer_sql
-from schemas import AnswerWithSQL, RAGAnswer, SearchResult, SQLResult
+from schemas import AnswerWithSQL, IntentionSQL, RAGAnswer, SearchResult, SQLResult
 
 # Chunks factices réutilisés par les tests gratuits : de vrais SearchResult, donc
 # exactement ce que renvoie VectorStoreManager.search() - les tests reproduisent le
@@ -198,6 +199,57 @@ def test_description_contient_le_schema_et_les_exemples(base_nba):
 
 def test_le_tool_est_enregistre_sur_agent():
     assert "interroger_base_nba" in generation.agent._function_toolset.tools
+
+
+# --- Couverture : le tool est-il proposé au modèle ? ---
+
+
+def _tool_def():
+    """La définition du tool telle que Pydantic AI la passe au hook."""
+    from pydantic_ai.tools import ToolDefinition
+
+    return ToolDefinition(name="interroger_base_nba", parameters_json_schema={})
+
+
+def test_hook_retire_le_tool_si_la_base_ne_couvre_pas(monkeypatch):
+    """Le mécanisme central : `prepare` renvoie None, donc le modèle ne voit pas le
+    tool. Le `description_du_tool` piégé vérifie qu'on n'ouvre pas la base pour
+    décrire un tool qu'on retire."""
+    appels = []
+    monkeypatch.setattr(generation, "description_du_tool", lambda *a: appels.append(1) or "")
+
+    decision = valider_intention(IntentionSQL(base_sollicitee=True, filtre_lieu=True))
+    trace = TraceSQL(decision=decision)
+    assert generation._injecter_schema(_contexte(trace), _tool_def()) is None
+    assert appels == [], "la base ne doit pas être ouverte pour un tool retiré"
+
+
+def test_hook_garde_le_tool_si_la_base_couvre(monkeypatch):
+    """Contre-épreuve : une demande couverte laisse le tool en place, avec son schéma."""
+    monkeypatch.setattr(generation, "description_du_tool", lambda *a: "SCHEMA")
+
+    trace = TraceSQL(decision=valider_intention(IntentionSQL(base_sollicitee=True)))
+    tool_def = generation._injecter_schema(_contexte(trace), _tool_def())
+    assert tool_def is not None and tool_def.description == "SCHEMA"
+
+
+def test_hook_garde_le_tool_sans_validation(monkeypatch):
+    """Sans décision, comportement d'origine : un garde-fou absent ne doit pas
+    désactiver le système."""
+    monkeypatch.setattr(generation, "description_du_tool", lambda *a: "SCHEMA")
+
+    tool_def = generation._injecter_schema(_contexte(TraceSQL()), _tool_def())
+    assert tool_def is not None
+
+
+def test_extraction_en_echec_laisse_le_sql_disponible(monkeypatch):
+    """Le garde-fou est un filet, pas un passage obligé : une panne d'extraction ne
+    doit pas priver l'agent de la base."""
+    def planter(*a, **k):
+        raise RuntimeError("API indisponible")
+
+    monkeypatch.setattr(generation.agent_intention, "run_sync", planter)
+    assert generation.analyser_couverture("Combien de points pour Jokić ?").sql_autorise
 
 
 # --- Test payant (vrai appel Mistral via l'agent) ---

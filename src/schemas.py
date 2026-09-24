@@ -9,6 +9,8 @@ Parcours des données et modèle correspondant :
     fichier brut -> SourceDocument -> TextChunk -> EmbeddedChunk -> index Faiss
     question -> SearchResult (chunks récupérés) -> RAGAnswer (réponse du modèle)
 """
+from typing import Literal
+
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 # Nombre minimal de caractères non blancs pour qu'un document extrait soit jugé
@@ -179,6 +181,49 @@ class PlayerRow(BaseModel):
                 f"games_played ({self.games_played})"
             )
         return self
+
+
+class IntentionSQL(BaseModel):
+    """Ce que la question demande À LA BASE — pas ce qu'elle mentionne.
+
+    Une question peut évoquer les playoffs et ne demander à la base qu'un total de
+    saison : ni ses mots ni le SQL produit ne les distinguent.
+
+    Chaque axe porte une valeur « autre », jamais couverte par le registre : ce que
+    le vocabulaire ne sait pas exprimer doit refuser, pas se rabattre sur le défaut.
+    """
+
+    base_sollicitee: bool = Field(
+        description="True dès qu'une partie de la réponse exige un chiffre de la base NBA, "
+        "même si l'autre partie vient des documents textuels. False seulement si aucun "
+        "chiffre n'est nécessaire."
+    )
+    granularite: Literal["saison", "match", "serie", "autre"] = Field(
+        default="saison",
+        description="Agrégat de saison, match par match, série de playoffs, ou « autre » "
+        "(mi-temps...). Une moyenne par match sur la saison reste « saison » ; "
+        "« match » vise un match identifié.",
+    )
+    periode: Literal[
+        "saison_courante", "date_precise", "plusieurs_saisons", "n_derniers_matchs", "autre"
+    ] = Field(
+        default="saison_courante",
+        description="Fenêtre temporelle. « autre » si aucune valeur ne convient.",
+    )
+    competition: Literal["saison_reguliere", "playoffs", "autre"] = Field(
+        default="saison_reguliere",
+        description="Compétition. « autre » pour play-in, présaison, All-Star Game, "
+        "Summer League ou toute compétition non listée.",
+    )
+    filtre_lieu: bool = Field(
+        default=False, description="True si la question distingue domicile et extérieur."
+    )
+    filtre_adversaire: bool = Field(
+        default=False, description="True si la question restreint à un adversaire précis."
+    )
+    filtre_poste: bool = Field(
+        default=False, description="True si la question restreint à un poste (meneur, pivot...)."
+    )
 
 
 class SQLResult(BaseModel):
