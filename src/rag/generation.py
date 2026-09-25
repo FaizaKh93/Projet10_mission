@@ -16,13 +16,26 @@ from rag.compatibilite import Decision, valider_intention
 from rag.sql_tool import RequeteRefusee, description_du_tool, executer_sql
 from schemas import AnswerWithSQL, IntentionSQL, RAGAnswer, SearchResult, SQLResult
 
-# Prompt repris MOT POUR MOT du prototype d'origine (app/chat.py et eval/evaluate_ragas.py),
-# volontairement non modifié : cette étape mesure l'effet de la couche Pydantic AI seule,
-# pas celui d'un prompt amélioré. Ce qui doit être mis dans citations/abstain est décrit
-# dans les Field(description=...) de RAGAnswer (schemas.py), transmis automatiquement au
-# modèle via le JSON Schema de la sortie structurée.
+# Prompt du prototype, conservé jusqu'ici mot pour mot, désormais enrichi d'un
+# cadrage des sources : c'est le second garde-fou, après le retrait du tool. Cette
+# étape mesure donc les deux ensemble — leurs effets ne sont pas isolés. Ce qui doit
+# être mis dans citations/abstain reste décrit dans les Field(description=...) de
+# RAGAnswer (schemas.py), transmis via le JSON Schema de la sortie structurée.
 SYSTEM_PROMPT = """Tu es 'NBA Analyst AI', un assistant expert sur la ligue de basketball NBA.
 Ta mission est de répondre aux questions des fans en animant le débat.
+
+Tu réponds uniquement à partir des sources ci-dessous :
+— les extraits de documents retrouvés : fils Reddit et fichier de données{sources_sql}
+
+N'utilise aucune connaissance personnelle sur la NBA : les entités citées dans
+la question servent à chercher, mais toute affirmation à leur sujet doit venir
+des sources.
+
+Tu peux comparer et synthétiser ce que les sources contiennent, en respectant
+exactement leur périmètre (saison régulière, playoffs, équipe, joueur,
+adversaire) : un chiffre valable pour un périmètre ne vaut pas pour un autre.
+
+Si les sources ne suffisent pas, mets abstain=true et dis ce qui manque.
 
 ---
 {context_str}
@@ -32,6 +45,18 @@ QUESTION DU FAN:
 {question}
 
 RÉPONSE DE L'ANALYSTE NBA:"""
+
+# Annoncé seulement si le tool existe pour ce run : promettre une source absente
+# inviterait le modèle à faire semblant de l'avoir consultée. L'Excel arrive par deux
+# chemins — 143 chunks vectorisés et les tables SQL — d'où la préséance donnée à la
+# base pour les chiffres : B3 montre qu'un en-tête du fichier peut être corrompu.
+SOURCE_SQL_PRESENTE = """ ;
+— les résultats de `interroger_base_nba`, la base de statistiques.
+
+Pour un chiffre, la base de statistiques fait foi : un extrait du fichier de
+données n'est qu'un fragment de tableau, il peut être tronqué ou mal aligné."""
+
+SOURCE_SQL_ABSENTE = "."
 
 # Provider explicite (plutôt que la chaîne "mistral" qui lirait MISTRAL_API_KEY
 # depuis l'environnement implicitement) - cohérent avec le reste du projet, qui
@@ -177,6 +202,22 @@ def verify_citations(answer: RAGAnswer, search_results: list[SearchResult]) -> R
     return answer
 
 
+def assembler_prompt(
+    search_results: list[SearchResult], question: str, decision: Decision | None
+) -> str:
+    """Assemble le prompt, en n'annonçant la base que si le tool existe pour ce run.
+
+    Séparée de generate_answer() pour être testable sans appel API. `decision=None`
+    rend le comportement d'origine : les deux sources annoncées.
+    """
+    sql_disponible = decision is None or decision.sql_autorise
+    return SYSTEM_PROMPT.format(
+        context_str=_format_context(search_results),
+        question=question,
+        sources_sql=SOURCE_SQL_PRESENTE if sql_disponible else SOURCE_SQL_ABSENTE,
+    )
+
+
 def generate_answer(search_results: list[SearchResult], question: str) -> AnswerWithSQL:
     """Génère une réponse structurée à partir des chunks récupérés et de la question.
 
@@ -184,13 +225,10 @@ def generate_answer(search_results: list[SearchResult], question: str) -> Answer
     le tool SQL pour le chiffré. Les requêtes qu'il a réellement exécutées sont
     relevées dans la trace, puis jointes à la réponse.
     """
-    context_str = _format_context(search_results)
-    # Même assemblage que le prototype d'origine : le template complet dans un seul message
-    user_prompt = SYSTEM_PROMPT.format(context_str=context_str, question=question)
-
-    # Si la base ne sait pas exprimer une dimension demandée, le tool ne sera pas
-    # proposé à l'agent (cf. _injecter_schema)
+    # La décision est prise avant l'assemblage : elle commande à la fois les sources
+    # annoncées dans le prompt et l'existence du tool (cf. _injecter_schema)
     trace = TraceSQL(decision=analyser_couverture(question))
+    user_prompt = assembler_prompt(search_results, question, trace.decision)
     result = agent.run_sync(user_prompt, deps=trace)
     answer = verify_citations(result.output, search_results)
 
