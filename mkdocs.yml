@@ -1,0 +1,54 @@
+# Configuration du site de documentation (rapport d'évaluation).
+#   uv run mkdocs serve      aperçu local sur http://localhost:8000
+#   uv run mkdocs build      génère le site statique dans site/
+#   uv run mkdocs gh-deploy  publie sur GitHub Pages
+site_name: Rapport d'évaluation — Assistant NBA SportSee
+site_description: Mise en place et évaluation d'un système RAG sur données hétérogènes
+repo_url: https://github.com/FaizaKh93/Projet10_mission
+repo_name: FaizaKh93/Projet10_mission
+docs_dir: docs
+
+# L'ordre de la navigation est l'ordre de lecture : c'est lui qui numérote les figures.
+nav:
+  - Synthèse: index.md
+  - Contexte et méthodologie: methodologie.md
+  - Protocole d'évaluation: evaluation.md
+  - Résultats: resultats.md
+  - Lecture métier: interpretation.md
+  - Limites et biais: limites.md
+  - Conclusion et perspectives: conclusion.md
+
+theme:
+  name: material
+  language: fr
+  features:
+    - navigation.instant
+    - navigation.top
+    - toc.follow       # le sommaire de page suit la lecture
+    - content.code.copy
+  palette:
+    # Deux thèmes : les figures sont sur fond clair, le thème clair est donc le défaut.
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/weather-night
+        name: Passer au thème sombre
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/weather-sunny
+        name: Passer au thème clair
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  # Rend les blocs ```mermaid comme des diagrammes plutôt que comme du code
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
