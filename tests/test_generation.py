@@ -20,6 +20,7 @@ from rag.generation import (
     TraceSQL,
     _format_context,
     _formater_resultat,
+    assembler_prompt,
     generate_answer,
     interroger_base_nba,
     verify_citations,
@@ -250,6 +251,46 @@ def test_extraction_en_echec_laisse_le_sql_disponible(monkeypatch):
 
     monkeypatch.setattr(generation.agent_intention, "run_sync", planter)
     assert generation.analyser_couverture("Combien de points pour Jokić ?").sql_autorise
+
+
+# --- Sources annoncées dans le prompt ---
+# Le prompt ne doit promettre que ce que le run possède : annoncer une base
+# inaccessible inviterait le modèle à faire semblant de l'avoir consultée.
+
+NOM_DU_TOOL = "interroger_base_nba"
+
+
+def test_le_prompt_annonce_la_base_quand_le_tool_existe():
+    prompt = assembler_prompt(CHUNKS, "Combien de points ?", valider_intention(IntentionSQL(base_sollicitee=True)))
+    assert NOM_DU_TOOL in prompt
+    assert "la base de statistiques fait foi" in prompt
+
+
+def test_le_prompt_tait_la_base_quand_le_tool_est_retire():
+    """B2 : filtre domicile/extérieur absent du schéma, donc tool retiré."""
+    decision = valider_intention(IntentionSQL(base_sollicitee=True, filtre_lieu=True))
+    prompt = assembler_prompt(CHUNKS, "Compare domicile et extérieur.", decision)
+    assert NOM_DU_TOOL not in prompt
+    assert "fait foi" not in prompt
+
+
+def test_le_prompt_tait_la_base_quand_elle_n_est_pas_sollicitee():
+    decision = valider_intention(IntentionSQL(base_sollicitee=False))
+    assert NOM_DU_TOOL not in assembler_prompt(CHUNKS, "Que disent les fans ?", decision)
+
+
+def test_sans_decision_le_prompt_annonce_les_deux_sources():
+    """Comportement d'origine conservé : un garde-fou absent n'ampute pas le prompt."""
+    assert NOM_DU_TOOL in assembler_prompt(CHUNKS, "Combien de points ?", None)
+
+
+@pytest.mark.parametrize("decision", [None, valider_intention(IntentionSQL(base_sollicitee=True, filtre_lieu=True))])
+def test_le_prompt_contient_toujours_la_question_et_les_chunks(decision):
+    """Le cadrage des sources ne doit amputer ni le contexte ni la question."""
+    prompt = assembler_prompt(CHUNKS, "Ma question ?", decision)
+    assert "Ma question ?" in prompt
+    assert "Jokić a marqué 2072 points" in prompt
+    assert "0_3" in prompt  # chunk_id visible, pour que le modèle puisse le citer
 
 
 # --- Test payant (vrai appel Mistral via l'agent) ---
