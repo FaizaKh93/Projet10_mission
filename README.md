@@ -4,6 +4,149 @@
 
 SportSee est une startup spécialisée dans l'IA appliquée à l'analyse de performance sportive. Ce projet fait évoluer un prototype d'assistant conversationnel (RAG + Mistral) pour qu'il puisse répondre de façon fiable à des questions analytiques précises sur des statistiques NBA (ex. *"Quel joueur a le meilleur pourcentage de réussite à 3 points sur les 5 derniers matchs ?"*), et pas seulement à des questions générales sur du contenu textuel.
 
+## Architecture
+
+Le système répond à une question en croisant **deux sources** : un index vectoriel pour le
+qualitatif (discussions Reddit) et une base relationnelle pour le chiffré (statistiques NBA).
+Deux garde-fous déterministes encadrent la branche chiffrée.
+
+### Vue d'ensemble
+
+```mermaid
+flowchart TD
+    U([Utilisateur]) -->|question| APP[app/chat.py<br/>interface Streamlit]
+
+    subgraph RAG["Chaîne RAG — src/rag/"]
+        APP --> VS[vector_store.py<br/>VectorStoreManager]
+        VS -->|embedding de la question| MI[(API Mistral<br/>mistral-embed)]
+        VS -->|top-5 chunks| GEN[generation.py<br/>generate_answer]
+
+        GEN --> COUV[compatibilite.py<br/>valider_intention]
+        COUV -->|Decision| GEN
+
+        GEN --> AG{{Agent Pydantic AI<br/>mistral-small-latest}}
+        AG -.->|si la Decision l'autorise| TOOL[sql_tool.py<br/>executer_sql]
+        TOOL --> DB[(data/nba.db<br/>SQLite lecture seule)]
+    end
+
+    subgraph ING["Ingestion — scripts/"]
+        IDX[index.py] --> FAISS[(data/vector_db<br/>index FAISS)]
+        LX[load_excel_to_db.py] --> DB
+        LR[load_reports_to_db.py] --> DB
+    end
+
+    FAISS -.->|chargé au démarrage| VS
+    AG -->|AnswerWithSQL validée| APP
+    APP --> U
+```
+
+### Le parcours d'une question
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as Utilisateur
+    participant A as chat.py
+    participant V as VectorStoreManager
+    participant G as generate_answer
+    participant C as valider_intention
+    participant M as Agent Mistral
+    participant S as sql_tool
+
+    U->>A: question
+    A->>V: search(question, k=5)
+    V-->>A: 5 SearchResult (chunks + scores)
+
+    A->>G: generate_answer(chunks, question)
+
+    Note over G,C: 1er garde-fou — le code décide, pas le modèle
+    G->>M: extraire l'intention (IntentionSQL)
+    M-->>G: granularité, période, compétition, filtres
+    G->>C: confronter l'intention au registre de capacités
+    C-->>G: Decision (SQL_DISPONIBLE / SQL_RETIRE / BASE_NON_SOLLICITEE)
+
+    Note over G,M: 2e garde-fou — le prompt n'annonce que les sources réellement disponibles
+    G->>M: prompt + chunks (+ ligne SQL si la Decision l'autorise)
+
+    alt tool disponible
+        M->>S: requête SQL écrite par le modèle
+        S->>S: 4 barrières (lecture seule, autoriseur, délai, limites)
+        S-->>M: lignes, ou refus renvoyé via ModelRetry
+    end
+
+    M-->>G: RAGAnswer (answer, citations, abstain)
+    G->>G: verify_citations — retire les chunk_id inexistants
+    G-->>A: AnswerWithSQL (+ requêtes réellement exécutées)
+    A-->>U: réponse, sources et SQL tracés
+```
+
+### Schéma de la base relationnelle
+
+Cinq tables, dont `matches` **modélisée mais vide** (aucune source ne permet de l'alimenter) et
+`reports` **masquée au tool SQL**. Le diagramme entité-association détaillé, avec les types
+SQLite réels et les clés, se trouve dans la section
+[Base de données relationnelle](#base-de-données-relationnelle-datanbadb).
+
+### Contrats de données
+
+Chaque étape du pipeline produit un objet validé par Pydantic. Une donnée invalide s'arrête à
+la frontière où elle apparaît, au lieu de se propager.
+
+```mermaid
+classDiagram
+    class SourceDocument {
+        +str page_content
+        +dict metadata
+        +contenu_exploitable()
+    }
+    class TextChunk {
+        +str id
+        +str text
+    }
+    class EmbeddedChunk {
+        +list~float~ embedding
+        +vecteur_valide()
+    }
+    class SearchResult {
+        +str id
+        +float score
+        +str text
+    }
+    class RAGAnswer {
+        +str answer
+        +list~str~ citations
+        +bool abstain
+        +str abstain_reason
+    }
+    class AnswerWithSQL {
+        +list~str~ sql_queries
+        +list~str~ sql_results
+    }
+    class IntentionSQL {
+        +bool base_sollicitee
+        +str granularite
+        +str periode
+        +str competition
+        +bool filtre_lieu
+    }
+    class Decision {
+        +Verdict verdict
+        +tuple manquants
+        +sql_autorise()
+    }
+
+    SourceDocument --> TextChunk : découpage
+    TextChunk --> EmbeddedChunk : vectorisation
+    EmbeddedChunk --> SearchResult : recherche
+    SearchResult --> RAGAnswer : génération
+    RAGAnswer <|-- AnswerWithSQL : enrichie par le code
+    IntentionSQL --> Decision : valider_intention()
+```
+
+`AnswerWithSQL` **hérite** de `RAGAnswer` au lieu d'ajouter un champ : le modèle ne reçoit que
+le schéma de `RAGAnswer`, il ne peut donc pas déclarer lui-même les requêtes qu'il a exécutées.
+C'est le code qui les renseigne depuis la trace.
+
 ## Installation (environnement reproductible avec uv)
 
 Le projet est géré avec [uv](https://docs.astral.sh/uv/) — `pyproject.toml` et `uv.lock` remplacent volontairement un `requirements.txt` classique : ils figent aussi les dépendances transitives (ce qu'un simple `requirements.txt` ne garantit pas), tout en restant équivalents pour l'installation.
@@ -22,37 +165,66 @@ Python 3.11 est pinné (`.python-version`) — version choisie pour la compatibi
 
 ## Lancer le projet
 
+Trois étapes d'ingestion, puis l'application. Les deux premières ne sont à refaire que si
+`data/inputs/` change — leurs sorties sont régénérables et non versionnées.
+
 ```bash
-# Construire/reconstruire l'index vectoriel à partir des documents dans data/inputs/
+# 1. Index vectoriel (FAISS) à partir des documents de data/inputs/
 uv run python scripts/index.py
 
-# Lancer l'application Streamlit
+# 2. Base relationnelle : statistiques depuis le classeur Excel...
+uv run python scripts/load_excel_to_db.py
+#    ...puis les 4 PDF Reddit dans la table reports
+uv run python scripts/load_reports_to_db.py
+
+# 3. Lancer l'interface
 uv run streamlit run app/chat.py
 ```
+
+Un premier lancement complet prend quelques minutes, l'indexation étant la plus longue
+(appels d'embedding à l'API Mistral, un par chunk).
 
 ## Structure du dépôt
 
 ```
 .
-├── data/
-│   ├── inputs/           # documents sources (PDF, Excel...)
-│   └── vector_db/        # index FAISS + chunks générés par scripts/index.py
-├── scripts/
-│   └── index.py            # script CLI d'indexation
-├── src/                    # code source réutilisable (importé par scripts/ et app/)
-│   ├── config.py
-│   ├── loading/
-│   │   └── loaders.py       # extraction multi-format (PDF/OCR, DOCX, TXT, CSV, Excel)
-│   └── rag/
-│       └── vector_store.py  # FAISS + embeddings Mistral
 ├── app/
-│   └── chat.py              # interface Streamlit
-├── pyproject.toml          # dépendances et métadonnées du projet (uv)
-├── uv.lock                 # versions verrouillées (reproductibilité)
-└── P10_DSML/                # prototype de référence fourni par Sarah (local uniquement, non versionné)
+│   └── chat.py                     # interface Streamlit (point d'entrée utilisateur)
+├── src/                            # code réutilisable, importé par app/, scripts/ et eval/
+│   ├── config.py                   # clés, modèles, chemins, SEARCH_K
+│   ├── schemas.py                  # 11 contrats Pydantic du pipeline
+│   ├── db_models.py                # tables SQLAlchemy (players, stats, teams, matches, reports)
+│   ├── loading/
+│   │   └── loaders.py              # extraction multi-format (PDF/OCR, DOCX, TXT, CSV, Excel)
+│   └── rag/
+│       ├── vector_store.py         # FAISS + embeddings Mistral (VectorStoreManager)
+│       ├── generation.py           # agent Pydantic AI, prompts, assemblage, verify_citations
+│       ├── compatibilite.py        # validateur question ↔ schéma (registre de capacités)
+│       └── sql_tool.py             # exécution SQL sous 4 barrières SQLite
+├── scripts/
+│   ├── index.py                    # construit l'index vectoriel
+│   ├── load_excel_to_db.py         # peuple players / stats / teams depuis le classeur
+│   └── load_reports_to_db.py       # peuple reports depuis les PDF Reddit
+├── eval/
+│   ├── testset.json                # 24 cas : 8 simples / 8 complexes / 8 bruités
+│   ├── evaluate_ragas.py           # exécute le système et le fait juger par RAGAS
+│   ├── analyze_results.ipynb       # analyse et comparaison des runs
+│   └── results/                    # un JSON par run (baseline, pydantic, tool_sql, guardrails)
+├── tests/                          # 129 tests gratuits + 41 marqués api / slow
+├── data/
+│   ├── inputs/                     # documents sources (4 PDF Reddit + regular NBA.xlsx)
+│   ├── vector_db/                  # index FAISS + chunks (régénérable)
+│   └── nba.db                      # base SQLite (régénérable)
+├── pyproject.toml                  # dépendances et configuration pytest (uv)
+├── uv.lock                         # versions verrouillées, transitives comprises
+└── P10_DSML/                       # prototype de référence, local uniquement, non versionné
 ```
 
-`P10_DSML/` est volontairement absent du dépôt git (`.gitignore`) : c'est le prototype d'origine, conservé intact en local comme référence, jamais modifié directement. Le contenu de `data/`, `scripts/`, `src/` et `app/` en a été repris (copié puis adapté a minima : imports et deux correctifs d'environnement — voir plus bas), pas réécrit à ce stade.
+`data/vector_db/` et `data/nba.db` sont **gitignorés** : tous deux se reconstruisent depuis
+`data/inputs/` par les trois scripts d'ingestion. Seules les sources sont versionnées.
+
+`P10_DSML/` est volontairement absent du dépôt git : c'est le prototype d'origine, conservé
+intact en local comme référence, jamais modifié directement.
 
 ## Analyse du prototype de référence (P10_DSML)
 
@@ -268,6 +440,64 @@ le code dans la trace du run — jamais déclarées par le modèle. Une requête
 l'interface ou enregistrée dans les résultats d'évaluation a donc forcément tourné sur la
 base. Même principe que `citations`, vérifiées en Python plutôt qu'auto-déclarées.
 
+## Évaluation
+
+Deux dispositifs distincts, à ne pas confondre : les **tests** vérifient que le code fait ce
+qu'on attend, l'**évaluation RAGAS** mesure la qualité des réponses du système.
+
+### Tests
+
+```bash
+# Suite gratuite : 129 tests, aucun appel réseau, quelques secondes
+uv run pytest
+
+# Tests appelant réellement Mistral (payants, explicitement exclus par défaut)
+uv run pytest -m api
+
+# Tests chargeant le modèle OCR (lents)
+uv run pytest -m slow
+```
+
+Les trois suites se lancent dans des processus séparés — voir le commentaire de
+`pyproject.toml` : importer `torch` après `ragas` fait planter l'interpréteur sous Windows.
+
+### Évaluation RAGAS
+
+```bash
+# Un run complet sur les 24 cas de eval/testset.json
+uv run python eval/evaluate_ragas.py --label <nom_du_run>
+
+# Options utiles
+#   --limit 3          n'évaluer que les 3 premiers cas (mise au point)
+#   --force            écraser un run portant déjà ce label
+#   --pause 5          secondes entre deux cas (défaut : 5)
+```
+
+**Prérequis** : `OPENAI_API_KEY` doit figurer dans `.env` en plus de `MISTRAL_API_KEY` — le
+système évalué tourne sous Mistral, mais le juge RAGAS est gpt-4o. Un run coûte donc des appels
+aux deux API et prend une quinzaine de minutes, la limite de 30 000 tokens/min de gpt-4o étant
+la contrainte dominante.
+
+Chaque run écrit `eval/results/<label>.json` et **n'écrase jamais** un run existant sans
+`--force`. Quatre runs sont versionnés :
+
+| Label | Système évalué |
+|---|---|
+| `baseline` | prototype d'origine, texte libre, aucune validation |
+| `validation_pydantic` | + sortie structurée, citations vérifiées, abstention |
+| `tool_sql` | + tool SQL sur la base NBA, testset porté à 24 cas |
+| `guardrails` | + validateur de couverture et cadrage des sources dans le prompt |
+
+### Analyse
+
+```bash
+uv run jupyter lab eval/analyze_results.ipynb   # ou l'ouvrir dans VS Code
+```
+
+Le notebook charge les runs présents dans `eval/results/`, analyse chacun séparément, les
+compare sur les cas communs, puis détaille les cas hybrides et les tests de robustesse. Il
+reste exécutable même si certains runs sont absents.
+
 ## État d'avancement
 
 - [x] Environnement reproductible (uv, Python 3.11)
@@ -276,4 +506,7 @@ base. Même principe que `citations`, vérifiées en Python plutôt qu'auto-déc
 - [x] Base relationnelle SQLite (`players`, `stats`, `teams`, `reports`, `matches`)
 - [x] Pipelines d'ingestion : classeur Excel et documents qualitatifs
 - [x] Tool SQL sécurisé, branché à l'agent et vérifié de bout en bout
-- [ ] Réévaluation RAGAS après ajout du tool
+- [x] Réévaluation RAGAS après ajout du tool (`tool_sql`)
+- [x] Validateur de couverture question ↔ schéma, et cadrage des sources dans le prompt
+- [x] Quatrième run RAGAS (`guardrails`) et analyse comparative des quatre runs
+- [ ] Rapport de mise en place et d'évaluation

@@ -132,7 +132,8 @@
     "evaluation_focus": "absence_grain_donnee",
     "question": "Quel joueur a le meilleur pourcentage de réussite à 3 points sur les 5 derniers matchs ?",
     "reference_answer": "Non calculable : le fichier ne contient que des agrégats de saison par joueur, aucune granularité par match.",
-    "source": "Données NBA — absence de colonne date/match"
+    "source": "Données NBA — absence de colonne date/match",
+    "note": "La question exige une granularité par match ; le fichier n'a que des agrégats de saison. Le risque n'est pas l'échec du SQL mais sa réussite : répondre sur la saison entière."
   },
   {
     "id": "B2",
@@ -143,7 +144,8 @@
     "evaluation_focus": "absence_grain_donnee",
     "question": "Compare les statistiques de rebonds de l'équipe à domicile et à l'extérieur.",
     "reference_answer": "Non calculable : aucun indicateur domicile/extérieur n'existe dans le fichier.",
-    "source": "Données NBA — absence de colonne domicile/extérieur"
+    "source": "Données NBA — absence de colonne domicile/extérieur",
+    "note": "Aucun indicateur domicile/extérieur parmi les colonnes. Le risque est une partition inventée — valide en SQL, fausse en fait."
   },
   {
     "id": "B3",
@@ -154,7 +156,8 @@
     "evaluation_focus": "anomalie_schema",
     "question": "Que représente réellement la colonne affichée \"15:00\" (ou \"15:00:00\") située entre FG% et 3PA dans le fichier de données ?",
     "reference_answer": "Il s'agit très probablement de la colonne 3PM (tirs à 3 points réussis), dont le nom a été mal interprété par Excel comme l'horaire \"3 PM\" puis affiché 15:00. Ce n'est pas une vraie donnée temporelle.",
-    "source": "Données NBA, colonne 12 — bug d'autoformat Excel"
+    "source": "Données NBA, colonne 12 — bug d'autoformat Excel",
+    "note": "Prémisse trompeuse : la question suppose une vraie colonne temporelle. Répondre « 15:00 » sans signaler le bug d'autoformat Excel serait une erreur silencieuse."
   },
   {
     "id": "B4",
@@ -165,7 +168,8 @@
     "evaluation_focus": "absence_corpus",
     "question": "Que disent les fans Reddit de la performance de Victor Wembanyama en playoffs 2025 ?",
     "reference_answer": "Aucune mention de Wembanyama dans les 4 PDF Reddit fournis. (Il existe bien comme joueur dans le fichier Excel, mais la question porte spécifiquement sur les discussions Reddit.)",
-    "source": "Reddit 1-4.pdf — absent du corpus"
+    "source": "Reddit 1-4.pdf — absent du corpus",
+    "note": "Miroir de M5 : ici c'est le corpus qui est muet, alors que le joueur existe bien dans la base. Teste que l'absence est attribuée à la bonne source."
   },
   {
     "id": "B5",
@@ -176,7 +180,8 @@
     "evaluation_focus": "ambiguite_subjective",
     "question": "D'après Reddit, qui est objectivement le meilleur meneur de jeu de ces playoffs ?",
     "reference_answer": "Pas de consensus dans les discussions : plusieurs joueurs (Haliburton, SGA...) sont mentionnés sous des angles différents.",
-    "source": "Reddit 1-4.pdf — question subjective sans réponse unique"
+    "source": "Reddit 1-4.pdf — question subjective sans réponse unique",
+    "note": "« Objectivement » appliqué à une opinion. Teste si le système signale l'ambiguïté au lieu de trancher un débat qui n'a pas de réponse unique."
   },
   {
     "id": "B6",
@@ -187,7 +192,8 @@
     "evaluation_focus": "exhaustivite_retrieval",
     "question": "Quelles équipes reviennent le plus souvent citées sur l'ensemble du fil de 15 pages de Reddit 1 (\"Who are teams in the playoffs that have impressed you?\") ?",
     "reference_answer": "Non fiable avec l'architecture actuelle : l'information existe potentiellement dans le corpus (répartie sur ~18 chunks pour ce seul PDF), mais un retrieval sémantique top-k ne garantit pas une couverture exhaustive nécessaire à un comptage global fiable.",
-    "source": "Reddit 1.pdf — stress test d'exhaustivité du retrieval, pas une absence réelle d'info"
+    "source": "Reddit 1.pdf — stress test d'exhaustivité du retrieval, pas une absence réelle d'info",
+    "note": "L'information existe mais est répartie sur ~18 chunks. Un top-k de 5 ne peut structurellement pas garantir l'exhaustivité : la limite est architecturale, pas documentaire."
   },
   {
     "id": "M1",
@@ -242,7 +248,8 @@
     "question": "D'après les données statistiques, combien de points Reggie Miller a-t-il marqués cette saison ?",
     "reference_answer": "Impossible à répondre : Reggie Miller est un joueur retraité, longuement discuté dans les documents Reddit mais absent de la base (seuls Brandon, Jordan, Leonard et Emanuel Miller y figurent).",
     "source": "Reddit 3.pdf + Données NBA",
-    "note": "Miroir de B4 : le nom sature les documents récupérés alors qu'il n'existe pas dans les données structurées. Le tool SQL rend ce cas nouvellement dangereux, puisqu'une requête sur '%Miller%' renverrait des homónymes."
+    "note": "Miroir de B4 : le nom sature les documents récupérés alors qu'il n'existe pas dans les données structurées. Le tool SQL rend ce cas nouvellement dangereux, puisqu'une requête sur '%Miller%' renverrait des homónymes.",
+    "sous_type": "absence_info"
   },
   {
     "id": "M6",
@@ -253,6 +260,7 @@
     "question": "Combien de points les Pacers ont-ils marqués lors de leur série de playoffs contre les Knicks ?",
     "reference_answer": "Impossible à répondre : la base ne couvre que la saison régulière et ne contient aucune granularité par match, par série ni par adversaire.",
     "source": "Reddit 1.pdf + Données NBA",
-    "note": "Le piège central du projet : les fils Reddit parlent tous de playoffs, la base ne couvre que la saison régulière. Teste le biais de mapping NL vers SQL."
+    "note": "Le piège central du projet : les fils Reddit parlent tous de playoffs, la base ne couvre que la saison régulière. Teste le biais de mapping NL vers SQL.",
+    "sous_type": "absence_info"
   }
 ]
