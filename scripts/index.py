@@ -1,12 +1,13 @@
 # scripts/index.py
+import os
+import sys
+
+# Rend src/ importable : la référence vit à côté de son paquet utils/,
+# ici le code réutilisable est dans src/.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 import argparse
 import logging
-import sys
-from pathlib import Path
 from typing import Optional
-
-# Rend le package src/ importable, quel que soit le répertoire depuis lequel ce script est lancé
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from config import INPUT_DIR # INPUT_DATA_URL (décommentez si besoin)
 from loading.loaders import download_and_extract_zip, load_and_parse_files

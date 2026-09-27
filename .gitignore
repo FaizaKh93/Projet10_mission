@@ -6,9 +6,6 @@ P10_DSML/
 *.env
 !.env.example
 
-# Configuration locale Logfire (contient le token du projet)
-.logfire/
-
 # Python
 __pycache__/
 *.pyc
@@ -27,12 +24,12 @@ Thumbs.db
 # Index vectoriel généré (régénérable via scripts/index.py)
 data/vector_db/
 
-# Base NBA générée depuis l Excel (régénérable via scripts/load_excel_to_db.py)
-data/nba.db
-
-# Site MkDocs généré par `mkdocs build`
-site/
-
 # Rapports de couverture générés par pytest-cov
 htmlcov/
 .coverage
+
+# Configuration locale Logfire (contient le token du projet)
+.logfire/
+
+# Cache pytest
+.pytest_cache/

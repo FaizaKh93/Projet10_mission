@@ -1,21 +1,11 @@
-# app/chat.py
-import streamlit as st
-import os
+# app/chat.py (version RAG)
 import sys
 import logging
 from pathlib import Path
 
-import logfire
-import truststore
-from dotenv import load_dotenv
+import streamlit as st
 
-# Doit précéder logfire.configure() : derrière un proxy qui intercepte le TLS,
-# l'export des traces échoue sinon (silencieusement, avec un simple warning).
-# Ne pas compter sur l'injection faite à l'import de rag.vector_store : elle
-# dépendrait de l'ordre des imports.
-truststore.inject_into_ssl()
-
-# Rend le package src/ importable, quel que soit le répertoire depuis lequel cette appli est lancée
+# Rend le paquet src/ importable quel que soit le répertoire de lancement.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 # --- Importations depuis vos modules ---
@@ -24,27 +14,18 @@ try:
         MISTRAL_API_KEY, MODEL_NAME, SEARCH_K,
         APP_TITLE, NAME
     )
-    from rag.generation import generate_answer
+    from rag.generation import SYSTEM_PROMPT, formater_contexte, generer_reponse
     from rag.vector_store import VectorStoreManager
 except ImportError as e:
     st.error(f"Erreur d'importation: {e}. Vérifiez la structure de vos dossiers et les fichiers dans 'src'.")
     st.stop()
 
-# --- Observabilité Logfire ---
-# NB: ces 2 lignes sont volontairement dupliquées à l'identique dans
-# eval/evaluate_ragas.py (pas de module partagé) - si on les modifie ici, penser à
-# faire la même chose là-bas.
-# send_to_logfire="if-token-present" : n'envoie rien tant qu'aucun token Logfire
-# n'est configuré, plutôt que d'échouer ou de demander une authentification
-logfire.configure(send_to_logfire="if-token-present")
-logfire.instrument_pydantic_ai()  # trace automatiquement les appels de l'agent (rag/generation.py)
-
 
 # --- Configuration du Logging ---
-# Note: Streamlit peut avoir sa propre gestion de logs. Configurer ici est une bonne pratique.
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(module)s - %(message)s')
 
 # --- Configuration de l'API Mistral ---
+# Le client lui-même vit dans rag/generation.py, partagé avec l'évaluation.
 api_key = MISTRAL_API_KEY
 model = MODEL_NAME
 
@@ -52,11 +33,9 @@ if not api_key:
     st.error("Erreur : Clé API Mistral non trouvée (MISTRAL_API_KEY). Veuillez la définir dans le fichier .env.")
     st.stop()
 
-# Le client Mistral n'est plus instancié ici : il est encapsulé dans l'agent
-# Pydantic AI de src/rag/generation.py (appelé via generate_answer()).
 
 # --- Chargement du Vector Store (mis en cache) ---
-@st.cache_resource # Garde le manager chargé en mémoire pour la session
+@st.cache_resource  # Garde le manager chargé en mémoire pour la session
 def get_vector_store_manager():
     logging.info("Tentative de chargement du VectorStoreManager...")
     try:
@@ -64,35 +43,28 @@ def get_vector_store_manager():
         # Vérifie si l'index a bien été chargé par le constructeur
         if manager.index is None or not manager.document_chunks:
             st.error("L'index vectoriel ou les chunks n'ont pas pu être chargés.")
-            st.warning("Assurez-vous d'avoir exécuté 'python indexer.py' après avoir placé vos fichiers dans le dossier 'inputs'.")
+            st.warning("Assurez-vous d'avoir exécuté 'python scripts/index.py' après avoir placé vos fichiers dans 'data/inputs'.")
             logging.error("Index Faiss ou chunks non trouvés/chargés par VectorStoreManager.")
-            return None # Retourne None si échec
+            return None  # Retourne None si échec
         logging.info(f"VectorStoreManager chargé avec succès ({manager.index.ntotal} vecteurs).")
         return manager
     except FileNotFoundError:
-         st.error("Fichiers d'index ou de chunks non trouvés.")
-         st.warning("Veuillez exécuter 'python indexer.py' pour créer la base de connaissances.")
-         logging.error("FileNotFoundError lors de l'init de VectorStoreManager.")
-         return None
+        st.error("Fichiers d'index ou de chunks non trouvés.")
+        st.warning("Veuillez exécuter 'python scripts/index.py' pour créer la base de connaissances.")
+        logging.error("FileNotFoundError lors de l'init de VectorStoreManager.")
+        return None
     except Exception as e:
         st.error(f"Erreur inattendue lors du chargement du VectorStoreManager: {e}")
         logging.exception("Erreur chargement VectorStoreManager")
         return None
 
-vector_store_manager = get_vector_store_manager()
 
-# Le prompt système vit maintenant dans src/rag/generation.py (source unique,
-# partagée avec eval/evaluate_ragas.py pour que l'évaluation teste bien ce que
-# l'app fait réellement).
+vector_store_manager = get_vector_store_manager()
 
 # --- Initialisation de l'historique de conversation ---
 if "messages" not in st.session_state:
     # Message d'accueil initial
     st.session_state.messages = [{"role": "assistant", "content": f"Bonjour ! Je suis votre analyste IA pour la {NAME}. Posez-moi vos questions sur les équipes, les joueurs ou les statistiques, et je vous répondrai en me basant sur les données les plus récentes."}]
-
-# La génération vit maintenant dans src/rag/generation.py : generate_answer()
-# renvoie un RAGAnswer validé (answer, citations, abstain, abstain_reason) au lieu
-# d'un texte libre.
 
 # --- Interface Utilisateur Streamlit ---
 st.title(APP_TITLE)
@@ -116,8 +88,7 @@ if prompt := st.chat_input(f"Posez votre question sur la {NAME}..."):
     if vector_store_manager is None:
         st.error("Le service de recherche de connaissances n'est pas disponible. Impossible de traiter votre demande.")
         logging.error("VectorStoreManager non disponible pour la recherche.")
-        # On arrête ici car on ne peut pas faire de RAG
-        st.stop()
+        st.stop()  # On arrête ici car on ne peut pas faire de RAG
 
     # 3. Rechercher le contexte dans le Vector Store
     try:
@@ -127,45 +98,34 @@ if prompt := st.chat_input(f"Posez votre question sur la {NAME}..."):
     except Exception as e:
         st.error(f"Une erreur est survenue lors de la recherche d'informations pertinentes: {e}")
         logging.exception(f"Erreur pendant vector_store_manager.search pour la query: {prompt}")
-        search_results = [] # On continue sans contexte si la recherche échoue
+        search_results = []  # On continue sans contexte si la recherche échoue
 
-    if not search_results:
-        logging.warning(f"Aucun contexte trouvé pour la query: {prompt}")
+    # 4. Formater le contexte pour le prompt LLM
+    context_str = formater_contexte(search_results)
+
+    # 5. Construire le prompt final pour l'API Mistral en utilisant le System Prompt RAG
+    final_prompt_for_llm = SYSTEM_PROMPT.format(context_str=context_str, question=prompt)
+
+    # Créer la liste de messages pour l'API (juste le prompt système/utilisateur combiné)
+    messages_for_api = [
+        # On pourrait séparer system et user, mais Mistral gère bien un long message user structuré
+        {"role": "user", "content": final_prompt_for_llm}
+    ]
 
     # === Fin de la logique RAG ===
 
-    # 4. Afficher indicateur + Générer la réponse via l'agent Pydantic AI
-    # (assemblage du contexte + prompt + validation des citations : voir rag/generation.py)
+    # 6. Afficher indicateur + Générer la réponse de l'assistant via LLM
     with st.chat_message("assistant"):
         message_placeholder = st.empty()
-        message_placeholder.text("...") # Indicateur simple
+        message_placeholder.text("...")  # Indicateur simple
 
-        try:
-            answer = generate_answer(search_results, prompt)
-            response_content = answer.answer
-        except Exception as e:
-            st.error(f"Erreur lors de la génération de la réponse : {e}")
-            logging.exception("Erreur pendant generate_answer")
-            answer = None
-            response_content = "Je suis désolé, une erreur technique m'empêche de répondre. Veuillez réessayer plus tard."
+        # Génération de la réponse de l'assistant en utilisant le prompt augmenté
+        response_content = generer_reponse(messages_for_api)
 
+        # Affichage de la réponse complète
         message_placeholder.write(response_content)
 
-        # Rend visible la sortie structurée : abstention explicite et chunks cités
-        # (citations déjà filtrées côté generation.py si le modèle en a inventé)
-        if answer is not None:
-            if answer.abstain:
-                st.warning(f"Réponse incertaine : {answer.abstain_reason or 'raison non précisée'}")
-            if answer.citations:
-                st.caption(f"Sources citées (chunk_id) : {', '.join(answer.citations)}")
-            # Les requêtes viennent de la trace d'exécution, pas d'une déclaration
-            # du modèle : ce qui est affiché a forcément tourné sur la base.
-            if answer.sql_queries:
-                with st.expander(f"Requêtes SQL exécutées ({len(answer.sql_queries)})"):
-                    for requete in answer.sql_queries:
-                        st.code(requete, language="sql")
-
-    # 5. Ajouter la réponse de l'assistant à l'historique (pour affichage UI)
+    # 7. Ajouter la réponse de l'assistant à l'historique (pour affichage UI)
     st.session_state.messages.append({"role": "assistant", "content": response_content})
 
 # Petit pied de page optionnel

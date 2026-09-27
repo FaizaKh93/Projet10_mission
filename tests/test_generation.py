@@ -1,325 +1,97 @@
 # tests/test_generation.py
-"""Tests de src/rag/generation.py (agent Pydantic AI + sortie structurée).
+"""Teste la génération sans appeler l'API : le client Mistral est remplacé par un double.
 
-Remplace l'ancien tests/test_chat.py : la logique de génération a été extraite de
-app/chat.py vers ce module, qui est testable directement (sans Streamlit).
-
-Deux groupes de tests :
-- logique pure (formatage du contexte, vérification des citations) : GRATUITS,
-  lancés par un simple `pytest`, aucun appel API ;
-- génération réelle : marqués "api", lancés seulement via `pytest -m api`.
+Ce qui est vérifié ici, c'est le contrat que l'évaluation mesure — format du contexte,
+contenu du prompt, température, et comportement quand ça se passe mal (contexte vide,
+API en erreur, recherche en échec).
 """
-import sqlite3
-import types
+from types import SimpleNamespace
 
 import pytest
-from pydantic_ai import ModelRetry
 
 from rag import generation
-from rag.generation import (
-    TraceSQL,
-    _format_context,
-    _formater_resultat,
-    assembler_prompt,
-    generate_answer,
-    interroger_base_nba,
-    verify_citations,
-)
-from rag.compatibilite import valider_intention
-from rag.sql_tool import description_du_tool, executer_sql
-from schemas import AnswerWithSQL, IntentionSQL, RAGAnswer, SearchResult, SQLResult
-
-# Chunks factices réutilisés par les tests gratuits : de vrais SearchResult, donc
-# exactement ce que renvoie VectorStoreManager.search() - les tests reproduisent le
-# contrat réel du code, pas une approximation en dict
-CHUNKS = [
-    SearchResult(id="0_3", score=78.4, text="Jokić a marqué 2072 points", metadata={"source": "regular NBA.xlsx"}),
-    SearchResult(id="1_7", score=61.2, text="Curry : 93,3% aux lancers francs", metadata={"source": "regular NBA.xlsx"}),
-]
-
-
-# --- Tests gratuits (aucun appel API) ---
-
-
-def test_format_context_expose_les_chunk_id():
-    """Le chunk_id doit apparaître dans le contexte : sans lui, le modèle ne peut
-    pas citer ses sources et le champ citations serait inutilisable."""
-    context = _format_context(CHUNKS)
-    assert "chunk_id: 0_3" in context
-    assert "chunk_id: 1_7" in context
-
-
-def test_format_context_vide():
-    """Sans aucun chunk récupéré, un message explicite remplace un contexte vide."""
-    assert "Aucune information pertinente" in _format_context([])
-
-
-def test_verify_citations_garde_les_citations_valides():
-    answer = RAGAnswer(answer="Jokić a marqué 2072 points", citations=["0_3"])
-    assert verify_citations(answer, CHUNKS).citations == ["0_3"]
-
-
-def test_verify_citations_retire_les_chunk_id_inventes():
-    """Cas central : le modèle cite un chunk qu'il n'a jamais reçu (hallucination
-    de source) - la citation doit être retirée, pas conservée telle quelle."""
-    answer = RAGAnswer(answer="...", citations=["0_3", "99_99"])
-    assert verify_citations(answer, CHUNKS).citations == ["0_3"]
-
-
-def test_verify_citations_sans_citation():
-    answer = RAGAnswer(answer="...", citations=[])
-    assert verify_citations(answer, CHUNKS).citations == []
-
-
-# --- Tool SQL branché à l'agent (gratuits : le tool est appelé sans LLM) ---
 
 
 @pytest.fixture
-def base_nba(tmp_path):
-    """Base minimale au schéma réel, suffisante pour exercer le branchement."""
-    chemin = tmp_path / "nba.db"
-    con = sqlite3.connect(chemin)
-    con.executescript(
-        """
-        CREATE TABLE players (player_id INTEGER PRIMARY KEY, full_name TEXT NOT NULL) STRICT;
-        CREATE TABLE teams (code TEXT PRIMARY KEY, name TEXT NOT NULL) STRICT;
-        CREATE TABLE stats (player_id INTEGER, team_code TEXT, pts_total INTEGER, fg_pct REAL) STRICT;
-        INSERT INTO players VALUES (1,'Nikola Jokic'), (2,'Jamal Murray');
-        INSERT INTO teams VALUES ('DEN','Denver Nuggets');
-        INSERT INTO stats VALUES (1,'DEN',2072,57.6), (2,'DEN',1200,47.4);
-        """
-    )
-    con.commit()
-    con.close()
-    return chemin
+def chunks():
+    """Deux chunks au format rendu par VectorStoreManager.search()."""
+    return [
+        {"text": "Cade a impressionné.", "score": 87.25, "metadata": {"source": "Reddit 1.pdf"}},
+        {"text": "Haliburton parle beaucoup.", "score": 71.0, "metadata": {}},
+    ]
 
 
-@pytest.fixture
-def tool_sur_base(monkeypatch, base_nba):
-    """Pointe le tool vers la base temporaire, en gardant la VRAIE executer_sql.
-
-    Seul le chemin de la base est substitué : l'autoriseur, la lecture seule et les
-    limites s'appliquent donc réellement pendant ces tests.
-    """
-    monkeypatch.setattr(generation, "executer_sql", lambda requete: executer_sql(requete, base_nba))
-
-
-def _contexte(trace: TraceSQL):
-    """RunContext minimal : le tool n'utilise que ctx.deps."""
-    return types.SimpleNamespace(deps=trace)
+def faux_client(capture: dict, contenu: str = "Réponse du modèle."):
+    """Client minimal : enregistre les arguments reçus et rend une réponse fixe."""
+    def complete(**kwargs):
+        capture.update(kwargs)
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=contenu))]
+        )
+    return SimpleNamespace(chat=SimpleNamespace(complete=complete))
 
 
-def test_tool_execute_la_requete_et_renvoie_les_lignes(tool_sur_base):
-    trace = TraceSQL()
-    texte = interroger_base_nba(_contexte(trace), "SELECT full_name FROM players ORDER BY player_id")
-    assert "Nikola Jokic" in texte
-    assert "full_name" in texte  # l'en-tête doit être là pour que le modèle nomme la colonne
+def test_formater_contexte_reprend_source_score_et_texte(chunks):
+    contexte = generation.formater_contexte(chunks)
+    # Source et score sur la première ligne, contenu sur la seconde
+    assert "Source: Reddit 1.pdf (Score: 87.2%)" in contexte
+    assert "Contenu: Cade a impressionné." in contexte
+    # Métadonnées absentes : la source retombe sur « Inconnue » plutôt que de planter
+    assert "Source: Inconnue (Score: 71.0%)" in contexte
+    # Les chunks sont séparés par le délimiteur, jamais collés
+    assert contexte.count("\n\n---\n\n") == len(chunks) - 1
 
 
-def test_tool_enregistre_la_requete_dans_la_trace(tool_sur_base):
-    """C'est cette trace qui alimente sql_queries : si elle est vide, la réponse
-    ne serait pas traçable."""
-    trace = TraceSQL()
-    interroger_base_nba(_contexte(trace), "SELECT pts_total FROM stats WHERE player_id = 1")
-    assert [r.query for r in trace.resultats] == ["SELECT pts_total FROM stats WHERE player_id = 1"]
-    assert trace.resultats[0].rows == [{"pts_total": 2072}]
+def test_formater_contexte_vide_annonce_l_absence():
+    """Sans chunk, le prompt porte une phrase explicite plutôt qu'un bloc vide."""
+    assert generation.formater_contexte([]) == generation.MESSAGE_CONTEXTE_VIDE
 
 
-@pytest.mark.parametrize(
-    "requete, attendu",
-    [
-        ("DELETE FROM players", "refusée"),
-        ("SELECT colonne_absente FROM players", "invalide"),
-        ("SELECT 1; DROP TABLE teams", "Une seule requête"),
-    ],
-)
-def test_tool_leve_model_retry_avec_un_message_exploitable(tool_sur_base, requete, attendu):
-    """Une requête rejetée ne doit pas faire échouer le run : ModelRetry renvoie le
-    message au modèle, qui corrige lui-même sa requête. D'où l'exigence que le
-    message dise LEQUEL des cas s'est produit."""
-    with pytest.raises(ModelRetry, match=attendu):
-        interroger_base_nba(_contexte(TraceSQL()), requete)
+def test_generate_answer_construit_le_prompt_attendu(chunks, monkeypatch):
+    capture = {}
+    monkeypatch.setattr(generation, "client", faux_client(capture))
+
+    reponse = generation.generate_answer(chunks, "Qui mène les Pistons ?")
+
+    assert reponse == "Réponse du modèle."
+    # Un seul message, rôle user : la référence ne sépare pas de message système
+    assert len(capture["messages"]) == 1
+    assert capture["messages"][0]["role"] == "user"
+    envoye = capture["messages"][0]["content"]
+    # Le prompt contient bien la question et le contexte récupéré
+    assert "Qui mène les Pistons ?" in envoye
+    assert "Cade a impressionné." in envoye
+    assert envoye.endswith("RÉPONSE DE L'ANALYSTE NBA:")
+    # Température basse, pour des réponses ancrées dans le contexte
+    assert capture["temperature"] == 0.1
 
 
-def test_tool_conserve_le_texte_renvoye_au_modele(tool_sur_base):
-    """La trace garde le texte exact remis au modèle, pas seulement la requête.
-
-    C'est cette part du contexte que l'évaluation doit juger : sans elle, une
-    réponse exacte tirée de la base est notée comme non fondée, faute de support
-    dans les chunks vectoriels.
-    """
-    trace = TraceSQL()
-    renvoye = interroger_base_nba(_contexte(trace), "SELECT pts_total FROM stats WHERE player_id = 1")
-    assert trace.textes == [renvoye]
-    assert "2072" in trace.textes[0]
-
-
-def test_tool_echoue_ne_pollue_pas_la_trace(tool_sur_base):
-    """Une requête refusée n'a rien exécuté : elle ne doit pas apparaître dans
-    sql_queries, sinon la traçabilité mentirait."""
-    trace = TraceSQL()
-    with pytest.raises(ModelRetry):
-        interroger_base_nba(_contexte(trace), "DELETE FROM players")
-    assert trace.resultats == []
-
-
-# --- Mise en forme du résultat pour le modèle ---
-
-
-def test_formater_resultat_signale_la_troncature():
-    """Sans cet avertissement, le modèle conclurait « il y a 2 joueurs » sur un extrait."""
-    resultat = SQLResult(
-        query="SELECT full_name FROM players", columns=["full_name"],
-        rows=[{"full_name": "A"}, {"full_name": "B"}],
-        row_count=2, truncated=True, execution_ms=1.0,
-    )
-    assert "Coupé à 2 lignes" in _formater_resultat(resultat)
-
-
-def test_formater_resultat_vide_est_explicite():
-    """Zéro ligne est une information : la donnée n'existe pas. Le modèle doit le
-    lire comme tel plutôt que comme une absence de réponse."""
-    resultat = SQLResult(
-        query="SELECT 1", columns=["x"], rows=[], row_count=0, truncated=False, execution_ms=1.0
-    )
-    assert "Aucune ligne" in _formater_resultat(resultat)
-
-
-# --- Description exposée au modèle ---
-
-
-def test_description_contient_le_schema_et_les_exemples(base_nba):
-    """La description porte tout ce que le modèle doit savoir : sans le schéma il
-    inventerait des colonnes, sans les exemples il oublierait les jointures."""
-    description = description_du_tool(f"sqlite:///{base_nba}")
-    assert "CREATE TABLE" in description
-    assert "_total" in description  # conventions d'unités
-    assert "Exemples de questions" in description
-    assert "JOIN players p USING (player_id)" in description
-
-
-def test_le_tool_est_enregistre_sur_agent():
-    assert "interroger_base_nba" in generation.agent._function_toolset.tools
-
-
-# --- Couverture : le tool est-il proposé au modèle ? ---
-
-
-def _tool_def():
-    """La définition du tool telle que Pydantic AI la passe au hook."""
-    from pydantic_ai.tools import ToolDefinition
-
-    return ToolDefinition(name="interroger_base_nba", parameters_json_schema={})
-
-
-def test_hook_retire_le_tool_si_la_base_ne_couvre_pas(monkeypatch):
-    """Le mécanisme central : `prepare` renvoie None, donc le modèle ne voit pas le
-    tool. Le `description_du_tool` piégé vérifie qu'on n'ouvre pas la base pour
-    décrire un tool qu'on retire."""
+def test_generer_reponse_refuse_un_prompt_vide(monkeypatch):
+    """Aucun appel ne doit partir si la liste de messages est vide."""
     appels = []
-    monkeypatch.setattr(generation, "description_du_tool", lambda *a: appels.append(1) or "")
-
-    decision = valider_intention(IntentionSQL(base_sollicitee=True, filtre_lieu=True))
-    trace = TraceSQL(decision=decision)
-    assert generation._injecter_schema(_contexte(trace), _tool_def()) is None
-    assert appels == [], "la base ne doit pas être ouverte pour un tool retiré"
-
-
-def test_hook_garde_le_tool_si_la_base_couvre(monkeypatch):
-    """Contre-épreuve : une demande couverte laisse le tool en place, avec son schéma."""
-    monkeypatch.setattr(generation, "description_du_tool", lambda *a: "SCHEMA")
-
-    trace = TraceSQL(decision=valider_intention(IntentionSQL(base_sollicitee=True)))
-    tool_def = generation._injecter_schema(_contexte(trace), _tool_def())
-    assert tool_def is not None and tool_def.description == "SCHEMA"
+    monkeypatch.setattr(
+        generation, "client",
+        SimpleNamespace(chat=SimpleNamespace(complete=lambda **kw: appels.append(kw)))
+    )
+    assert generation.generer_reponse([]) == "Je ne peux pas traiter une demande vide."
+    assert appels == []
 
 
-def test_hook_garde_le_tool_sans_validation(monkeypatch):
-    """Sans décision, comportement d'origine : un garde-fou absent ne doit pas
-    désactiver le système."""
-    monkeypatch.setattr(generation, "description_du_tool", lambda *a: "SCHEMA")
+def test_generer_reponse_absorbe_une_erreur_api(monkeypatch):
+    """Une panne de l'API rend un message, jamais une exception qui casse le run."""
+    def explose(**kwargs):
+        raise RuntimeError("503 Service Unavailable")
 
-    tool_def = generation._injecter_schema(_contexte(TraceSQL()), _tool_def())
-    assert tool_def is not None
-
-
-def test_extraction_en_echec_laisse_le_sql_disponible(monkeypatch):
-    """Le garde-fou est un filet, pas un passage obligé : une panne d'extraction ne
-    doit pas priver l'agent de la base."""
-    def planter(*a, **k):
-        raise RuntimeError("API indisponible")
-
-    monkeypatch.setattr(generation.agent_intention, "run_sync", planter)
-    assert generation.analyser_couverture("Combien de points pour Jokić ?").sql_autorise
+    monkeypatch.setattr(
+        generation, "client", SimpleNamespace(chat=SimpleNamespace(complete=explose))
+    )
+    assert "erreur technique" in generation.generer_reponse([{"role": "user", "content": "?"}])
 
 
-# --- Sources annoncées dans le prompt ---
-# Le prompt ne doit promettre que ce que le run possède : annoncer une base
-# inaccessible inviterait le modèle à faire semblant de l'avoir consultée.
-
-NOM_DU_TOOL = "interroger_base_nba"
-
-
-def test_le_prompt_annonce_la_base_quand_le_tool_existe():
-    prompt = assembler_prompt(CHUNKS, "Combien de points ?", valider_intention(IntentionSQL(base_sollicitee=True)))
-    assert NOM_DU_TOOL in prompt
-    assert "la base de statistiques fait foi" in prompt
-
-
-def test_le_prompt_tait_la_base_quand_le_tool_est_retire():
-    """B2 : filtre domicile/extérieur absent du schéma, donc tool retiré."""
-    decision = valider_intention(IntentionSQL(base_sollicitee=True, filtre_lieu=True))
-    prompt = assembler_prompt(CHUNKS, "Compare domicile et extérieur.", decision)
-    assert NOM_DU_TOOL not in prompt
-    assert "fait foi" not in prompt
-
-
-def test_le_prompt_tait_la_base_quand_elle_n_est_pas_sollicitee():
-    decision = valider_intention(IntentionSQL(base_sollicitee=False))
-    assert NOM_DU_TOOL not in assembler_prompt(CHUNKS, "Que disent les fans ?", decision)
-
-
-def test_sans_decision_le_prompt_annonce_les_deux_sources():
-    """Comportement d'origine conservé : un garde-fou absent n'ampute pas le prompt."""
-    assert NOM_DU_TOOL in assembler_prompt(CHUNKS, "Combien de points ?", None)
-
-
-@pytest.mark.parametrize("decision", [None, valider_intention(IntentionSQL(base_sollicitee=True, filtre_lieu=True))])
-def test_le_prompt_contient_toujours_la_question_et_les_chunks(decision):
-    """Le cadrage des sources ne doit amputer ni le contexte ni la question."""
-    prompt = assembler_prompt(CHUNKS, "Ma question ?", decision)
-    assert "Ma question ?" in prompt
-    assert "Jokić a marqué 2072 points" in prompt
-    assert "0_3" in prompt  # chunk_id visible, pour que le modèle puisse le citer
-
-
-# --- Test payant (vrai appel Mistral via l'agent) ---
-
-
-@pytest.mark.api
-def test_agent_appelle_le_tool_sur_une_question_chiffree():
-    """LE test de bout en bout : le LLM détecte-t-il une question chiffrée, appelle-t-il
-    le tool, et synthétise-t-il le résultat ?
-
-    Tous les autres tests appellent le tool directement, sans LLM : ils prouvent que
-    le tool fonctionne, pas que l'agent s'en sert. Si le modèle répondait de mémoire
-    sans appeler le tool, ils passeraient tous et la fonctionnalité serait inerte.
-
-    La question ne porte volontairement sur AUCUN chunk fourni : la réponse ne peut
-    venir que de la base.
-    """
-    answer = generate_answer([], "Quelle équipe a marqué le plus de points cette saison ?")
-    assert isinstance(answer, AnswerWithSQL)
-    assert answer.sql_queries, "l'agent n'a appelé le tool sur aucune requête"
-    assert "Detroit Pistons" in answer.answer  # valeur réelle de la base : 10292 points
-
-
-@pytest.mark.api
-def test_generate_answer_renvoie_une_sortie_structuree():
-    """generate_answer() doit renvoyer un RAGAnswer validé, avec des citations
-    qui référencent uniquement des chunks réellement fournis."""
-    answer = generate_answer(CHUNKS, "Combien de points Nikola Jokić a-t-il marqués ?")
-    assert isinstance(answer, RAGAnswer)
-    assert answer.answer  # jamais vide
-    # Après verify_citations(), toute citation restante est forcément valide
-    assert all(c in {"0_3", "1_7"} for c in answer.citations)
+def test_generer_reponse_sans_choix(monkeypatch):
+    """Réponse structurellement valide mais sans contenu : message dédié."""
+    monkeypatch.setattr(
+        generation, "client",
+        SimpleNamespace(chat=SimpleNamespace(complete=lambda **kw: SimpleNamespace(choices=[])))
+    )
+    assert "pas pu générer" in generation.generer_reponse([{"role": "user", "content": "?"}])

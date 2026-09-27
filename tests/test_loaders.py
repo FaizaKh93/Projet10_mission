@@ -1,66 +1,57 @@
 # tests/test_loaders.py
-"""Tests de src/loading/loaders.py : règle métier sur le schéma Excel et
-chargement paresseux du modèle OCR.
+"""Tests de src/loading/loaders.py : extraction du texte des fichiers d'entrée.
 
-Gratuits par défaut (aucun appel API, aucun modèle chargé). Le seul test qui
-initialise réellement EasyOCR est marqué `slow` et exclu de `pytest`.
+Gratuits (aucun appel API). Ils décrivent ce que le pipeline d'indexation donne
+réellement à manger à l'index, puisque c'est ce texte-là qui devient un chunk.
 """
-import datetime
-
 import pandas as pd
-import pytest
 
-from loading import loaders
-from loading.loaders import extract_text_from_excel, validate_excel_schema
+from loading.loaders import extract_text_from_csv, extract_text_from_excel, extract_text_from_txt
 
 
-# --- Règle métier : schéma Excel ---
+def test_excel_une_feuille_rend_du_texte_brut(tmp_path):
+    """Une seule feuille : le texte est rendu directement, pas dans un dictionnaire.
 
-
-def test_validate_excel_schema_detecte_entete_corrompu():
-    """Cas réellement rencontré dans ce projet : Excel a réinterprété l'en-tête
-    "3PM" (tirs à 3 points réussis) comme l'horaire "3 PM", stocké en
-    datetime.time et affiché "15:00". Les valeurs étaient intactes, seul le nom
-    de colonne était corrompu — d'où un simple signalement, sans rejet."""
-    df = pd.DataFrame({"PTS": [1], datetime.time(15, 0): [2], "FG%": [3]})
-    anomalies = validate_excel_schema(df, "Données NBA", "regular NBA.xlsx")
-    assert len(anomalies) == 1
-    assert "15:00" in anomalies[0]
-
-
-def test_validate_excel_schema_tableau_sain():
-    """Aucun faux positif sur des en-têtes normaux."""
-    df = pd.DataFrame({"PTS": [1], "3PM": [2], "FG%": [3]})
-    assert validate_excel_schema(df, "Données NBA", "regular NBA.xlsx") == []
-
-
-# --- Chargement paresseux de l'OCR ---
-
-
-def test_import_ne_charge_pas_ocr():
-    """Importer loaders.py ne doit plus initialiser EasyOCR : avant, un simple
-    import chargeait un modèle OCR complet (~30 s), même sans PDF à traiter."""
-    assert loaders._ocr_reader is None
-
-
-def test_excel_ne_declenche_pas_ocr(tmp_path, monkeypatch):
-    """Le traitement d'un Excel ne doit jamais toucher à l'OCR."""
-    appels = []
-    monkeypatch.setattr(loaders, "get_ocr_reader", lambda: appels.append(1))
-
-    fichier = tmp_path / "test.xlsx"
-    pd.DataFrame({"PTS": [2072], "REB": [889]}).to_excel(fichier, index=False)
+    Le tableau passe par `DataFrame.to_string()` : les valeurs survivent, mais la
+    structure ligne/colonne devient une mise en page à espaces, sans typage.
+    """
+    fichier = tmp_path / "stats.xlsx"
+    pd.DataFrame({"Player": ["Nikola Jokic"], "PTS": [2072]}).to_excel(fichier, index=False)
 
     texte = extract_text_from_excel(str(fichier))
+
+    assert isinstance(texte, str)
+    assert "Nikola Jokic" in texte
     assert "2072" in texte
-    assert appels == []  # OCR jamais sollicité
 
 
-@pytest.mark.slow
-def test_get_ocr_reader_initialise_le_modele():
-    """Vérifie le vrai chemin OCR, que le chargement paresseux a modifié.
-    Marqué `slow` : charge réellement EasyOCR (plusieurs dizaines de secondes)."""
-    lecteur = loaders.get_ocr_reader()
-    assert lecteur is not None
-    assert loaders._ocr_reader is lecteur  # mis en cache, pas rechargé au 2e appel
-    assert loaders.get_ocr_reader() is lecteur
+def test_excel_plusieurs_feuilles_rend_un_dictionnaire(tmp_path):
+    """Plusieurs feuilles : un dictionnaire feuille -> texte, une entrée par onglet."""
+    fichier = tmp_path / "multi.xlsx"
+    with pd.ExcelWriter(fichier) as writer:
+        pd.DataFrame({"PTS": [2072]}).to_excel(writer, sheet_name="Joueurs", index=False)
+        pd.DataFrame({"W": [64]}).to_excel(writer, sheet_name="Equipes", index=False)
+
+    feuilles = extract_text_from_excel(str(fichier))
+
+    assert set(feuilles) == {"Joueurs", "Equipes"}
+    assert "2072" in feuilles["Joueurs"]
+
+
+def test_fichier_illisible_rend_none(tmp_path):
+    """Un fichier corrompu ne doit pas interrompre l'indexation : None, et on passe."""
+    fichier = tmp_path / "casse.xlsx"
+    fichier.write_text("ceci n'est pas un classeur", encoding="utf-8")
+
+    assert extract_text_from_excel(str(fichier)) is None
+
+
+def test_txt_et_csv_rendent_leur_contenu(tmp_path):
+    """Les deux autres formats textuels du pipeline, pour couvrir leur chemin."""
+    txt = tmp_path / "note.txt"
+    txt.write_text("Haliburton mène les Pacers.", encoding="utf-8")
+    assert "Haliburton" in extract_text_from_txt(str(txt))
+
+    csv = tmp_path / "stats.csv"
+    csv.write_text("Player,PTS\nNikola Jokic,2072\n", encoding="utf-8")
+    assert "2072" in extract_text_from_csv(str(csv))

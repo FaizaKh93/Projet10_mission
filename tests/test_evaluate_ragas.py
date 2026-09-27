@@ -1,6 +1,6 @@
 # tests/test_evaluate_ragas.py
-"""Vérifie que query_prototype() (eval/evaluate_ragas.py) enchaîne correctement
-recherche + génération via l'agent Pydantic AI.
+"""Vérifie que query_prototype() (eval/evaluate_ragas.py) enchaîne bien recherche
+puis génération, et rend ce que la boucle d'évaluation attend.
 
 Appelle la vraie API Mistral (facturé, coût négligeable) : jamais lancé par un
 simple `pytest`, seulement via `pytest -m api`.
@@ -15,7 +15,6 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "eval"))
 
 from evaluate_ragas import query_prototype
-from schemas import RAGAnswer
 from rag.vector_store import VectorStoreManager
 
 pytestmark = pytest.mark.api
@@ -27,20 +26,14 @@ def vector_store():
 
 
 def test_query_prototype(vector_store):
-    """query_prototype() renvoie 4 valeurs : les chunks, les chunks élargis à la
-    provenance SQL (jugés par la faithfulness seule), la réponse vue par
-    l'utilisateur, et le RAGAnswer complet."""
-    contexts, contexts_complets, answer, rag_answer = query_prototype(
+    """query_prototype() rend les chunks bruts et la réponse texte."""
+    search_results, answer = query_prototype(
         vector_store, "Combien de points Nikola Jokić a-t-il marqués ?"
     )
-    # Le contexte élargi contient au moins les chunks, plus la provenance SQL s'il y en a
-    assert len(contexts_complets) >= len(contexts)
-    # contexts = liste des textes des chunks récupérés (peut être vide, mais jamais None)
-    assert isinstance(contexts, list)
-    # answer = chaîne envoyée au juge RAGAS, ne doit jamais être vide
-    assert answer
-    # rag_answer = sortie structurée, source des champs abstain/citations du JSON de résultats
-    assert isinstance(rag_answer, RAGAnswer)
-    # Si le modèle s'abstient, la raison doit se retrouver dans la réponse notée par RAGAS
-    if rag_answer.abstain and rag_answer.abstain_reason:
-        assert rag_answer.abstain_reason in answer
+    # Les chunks arrivent en dicts : c'est ce format que la boucle découpe ensuite
+    # en `retrieved_contexts` (texte) et `retrieved_sources` (métadonnées).
+    assert isinstance(search_results, list)
+    for res in search_results:
+        assert "text" in res and "metadata" in res and "score" in res
+    # La réponse envoyée au juge RAGAS ne doit jamais être vide
+    assert isinstance(answer, str) and answer.strip()

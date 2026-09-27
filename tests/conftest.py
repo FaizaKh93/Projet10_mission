@@ -13,9 +13,9 @@ truststore.inject_into_ssl()  # même fix TLS proxy que le reste du projet
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 # Chargé ici et pas seulement via config.py : le hook ci-dessous lit MISTRAL_API_KEY
-# dès la collecte, avant qu'un test ait importé config. Sans ça, le skip dépendait
-# d'un effet de bord — test_generation.py importe rag.generation au niveau module,
-# test_compatibilite.py non : lancé seul, il se sautait lui-même.
+# dès la collecte, avant qu'un test ait importé config. Sans ça, le skip dépendrait
+# d'un effet de bord — de quel module de test importe config le premier, donc de la
+# sélection lancée.
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 
