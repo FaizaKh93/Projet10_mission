@@ -37,32 +37,17 @@ dev = [
     "pytest-cov>=7.1.0",
     "statsmodels>=0.15.0",
 ]
-docs = [
-    "mkdocs-material>=9.7.7",
-]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# Par défaut, "pytest" seul n'exécute ni les tests "api" (vrais appels payants à
-# Mistral) ni les tests "slow" (chargement réel du modèle OCR) : il faut les
-# demander explicitement.
-addopts = "-m 'not api and not slow'"
-# Les tests exercent des spans Logfire sans avoir appele logfire.configure() :
-# le warning est attendu ici. Filtre sur le message, la classe vivant dans un
-# module prive (logfire._internal).
-filterwarnings = ["ignore:No logs or spans will be created"]
+# Par défaut, "pytest" seul n'exécute pas les tests "api" (vrais appels payants à
+# Mistral) : il faut les demander explicitement.
+addopts = "-m 'not api'"
 markers = [
     "api: tests appelant de vraies API externes payantes (Mistral) - lancer avec `pytest -m api`",
-    "slow: tests chargeant un modèle lourd (EasyOCR) - lancer avec `pytest -m slow`",
 ]
-# ATTENTION : ne pas lancer `pytest -m ""` (tout dans un seul processus). Sur Windows,
-# importer torch (via easyocr, test `slow`) après que la pile d'évaluation (ragas,
-# logfire) a été chargée fait planter l'interpréteur ("Fatal Python error: Aborted"),
-# un conflit entre extensions natives. Chaque suite passe sans problème dans son
-# propre processus :
-#     uv run pytest && uv run pytest -m api && uv run pytest -m slow
-# Le pipeline réel n'est pas concerné : scripts/index.py ne charge ni ragas ni logfire
-# (ordre d'import vérifié).
+# Les deux suites se lancent dans leur propre processus :
+#     uv run pytest && uv run pytest -m api
 
 # --- Couverture de code -------------------------------------------------------------
 # Mesurée sur src/ et app/ : le code du système. scripts/ et eval/ en sont exclus,

@@ -1,41 +1,24 @@
 # src/rag/generation.py
-"""Génération de réponse via un agent Pydantic AI (Mistral), avec sortie
-structurée validée (RAGAnswer) et vérification déterministe des citations."""
-import logging
-from dataclasses import dataclass, field, replace
+"""Génération de la réponse : assemblage du contexte et du prompt, appel du modèle.
 
-import logfire
-from pydantic_ai import Agent, ModelRetry, RunContext
-from pydantic_ai.models.mistral import MistralModel
-from pydantic_ai.providers.mistral import MistralProvider
-from pydantic_ai.settings import ModelSettings
-from pydantic_ai.tools import ToolDefinition
+Cette logique vit dans le corps du script Streamlit (`app/chat.py`, étapes 4 à 6) ; elle
+est extraite ici pour être **appelable** par l'évaluation et les tests. Mêmes étapes,
+même prompt, même température, même sortie en texte brut.
+
+Seul écart : le bloc `except` de `generer_reponse()` ne double plus son message d'un
+`st.error()`, l'affichage restant du ressort de `app/chat.py`.
+"""
+import logging
+
+import truststore
+from mistralai.client import Mistral
 
 from config import MISTRAL_API_KEY, MODEL_NAME
-from rag.compatibilite import Decision, valider_intention
-from rag.sql_tool import RequeteRefusee, description_du_tool, executer_sql
-from schemas import AnswerWithSQL, IntentionSQL, RAGAnswer, SearchResult, SQLResult
 
-# Prompt du prototype, conservé jusqu'ici mot pour mot, désormais enrichi d'un
-# cadrage des sources : c'est le second garde-fou, après le retrait du tool. Cette
-# étape mesure donc les deux ensemble — leurs effets ne sont pas isolés. Ce qui doit
-# être mis dans citations/abstain reste décrit dans les Field(description=...) de
-# RAGAnswer (schemas.py), transmis via le JSON Schema de la sortie structurée.
+truststore.inject_into_ssl()  # requis derrière un proxy qui inspecte le TLS
+
 SYSTEM_PROMPT = """Tu es 'NBA Analyst AI', un assistant expert sur la ligue de basketball NBA.
 Ta mission est de répondre aux questions des fans en animant le débat.
-
-Tu réponds uniquement à partir des sources ci-dessous :
-— les extraits de documents retrouvés : fils Reddit et fichier de données{sources_sql}
-
-N'utilise aucune connaissance personnelle sur la NBA : les entités citées dans
-la question servent à chercher, mais toute affirmation à leur sujet doit venir
-des sources.
-
-Tu peux comparer et synthétiser ce que les sources contiennent, en respectant
-exactement leur périmètre (saison régulière, playoffs, équipe, joueur,
-adversaire) : un chiffre valable pour un périmètre ne vaut pas pour un autre.
-
-Si les sources ne suffisent pas, mets abstain=true et dis ce qui manque.
 
 ---
 {context_str}
@@ -46,195 +29,62 @@ QUESTION DU FAN:
 
 RÉPONSE DE L'ANALYSTE NBA:"""
 
-# Annoncé seulement si le tool existe pour ce run : promettre une source absente
-# inviterait le modèle à faire semblant de l'avoir consultée. L'Excel arrive par deux
-# chemins — 143 chunks vectorisés et les tables SQL — d'où la préséance donnée à la
-# base pour les chiffres : B3 montre qu'un en-tête du fichier peut être corrompu.
-SOURCE_SQL_PRESENTE = """ ;
-— les résultats de `interroger_base_nba`, la base de statistiques.
-
-Pour un chiffre, la base de statistiques fait foi : un extrait du fichier de
-données n'est qu'un fragment de tableau, il peut être tronqué ou mal aligné."""
-
-SOURCE_SQL_ABSENTE = "."
-
-# Provider explicite (plutôt que la chaîne "mistral" qui lirait MISTRAL_API_KEY
-# depuis l'environnement implicitement) - cohérent avec le reste du projet, qui
-# passe toujours la clé explicitement
-_model = MistralModel(MODEL_NAME, provider=MistralProvider(api_key=MISTRAL_API_KEY))
-
-# Le modèle décrit la demande, le code tranche (rag/compatibilite.py) — comme
-# l'autoriseur SQLite refuse les écritures sans consulter le modèle. 
-PROMPT_INTENTION = """Décris ce que cette question demande À LA BASE DE DONNÉES statistiques.
-
-Ne décris PAS ce que la question mentionne : décris ce qu'il faudrait aller chercher
-dans une base de statistiques pour y répondre. Si la réponse se trouve entièrement
-dans des documents textuels, la base n'est pas sollicitée.
-
-QUESTION : {question}"""
-
-agent_intention = Agent(
-    model=_model,
-    output_type=IntentionSQL,
-    model_settings=ModelSettings(temperature=0.0),  # une classification, pas une rédaction
+MESSAGE_CONTEXTE_VIDE = (
+    "Aucune information pertinente trouvée dans la base de connaissances pour cette question."
 )
+TEMPERATURE = 0.1  # température basse, pour des réponses factuelles basées sur le contexte
+
+client = Mistral(api_key=MISTRAL_API_KEY)
 
 
-def analyser_couverture(question: str) -> Decision:
-    """Extrait l'intention puis la confronte au schéma. Un appel LLM par question.
+def formater_contexte(search_results: list[dict]) -> str:
+    """Assemble les chunks récupérés pour le prompt.
 
-    Si l'extraction échoue, le SQL reste disponible : un garde-fou en panne ne doit
-    pas priver le système de sa base.
+    Source et score, puis contenu. Aucun identifiant de chunk n'est transmis : une
+    réponse ne peut donc pas être rattachée à un passage précis.
     """
-    try:
-        intention = agent_intention.run_sync(PROMPT_INTENTION.format(question=question)).output
-    except Exception as e:
-        logging.warning(f"Extraction d'intention impossible, SQL laissé disponible : {e}")
-        return valider_intention(IntentionSQL(base_sollicitee=True))
-
-    decision = valider_intention(intention)
-    logging.info(f"Couverture : {decision.verdict.value} — {decision.detail()}")
-    return decision
-
-
-@dataclass
-class TraceSQL:
-    """Requêtes exécutées pendant un run. Une instance neuve par appel, passée en
-    `deps` : deux appels simultanés ne mélangent pas leurs traces."""
-
-    resultats: list[SQLResult] = field(default_factory=list)
-    # Texte exact renvoyé au modèle, conservé tel quel : c'est ce sur quoi la
-    # réponse s'appuie, donc ce qu'une évaluation de fidélité doit examiner.
-    textes: list[str] = field(default_factory=list)
-    # Lu par le hook `prepare` ; None = pas de validation (comportement d'origine)
-    decision: Decision | None = None
-
-
-# output_type=RAGAnswer : force une sortie structurée validée par Pydantic plutôt
-# qu'un texte libre (voir schemas.py) - construit une seule fois, réutilisé à chaque appel.
-# On ne passe pas le paramètre system_prompt de l'Agent : comme le prototype d'origine,
-# tout le template (persona + contexte + question) part dans un unique message user.
-# D'où le nom SYSTEM_PROMPT conservé tel quel - c'est celui du prototype, même contenu.
-# temperature=0.1 : valeur du prototype d'origine, reprise telle quelle (sans ça,
-# l'agent utiliserait la valeur par défaut de Mistral et on introduirait une
-# différence de comportement non voulue par rapport à la baseline).
-agent = Agent(
-    model=_model,
-    output_type=RAGAnswer,
-    deps_type=TraceSQL,
-    model_settings=ModelSettings(temperature=0.1),
-)
-
-
-def _injecter_schema(ctx: RunContext[TraceSQL], tool_def: ToolDefinition) -> ToolDefinition | None:
-    """Décide si le tool existe pour ce run, et pose sa description.
-
-    Renvoyer None **retire le tool** : le code le supprime, il ne demande pas au
-    modèle de s'abstenir. Le retour anticipé évite d'ouvrir la base pour rien.
-
-    Appelée avant chaque run ; le décorateur évaluerait `description=` à l'import,
-    ce qui exigerait que `data/nba.db` existe dès le chargement du module.
-    """
-    decision = ctx.deps.decision
-    if decision is not None and not decision.sql_autorise:
-        return None
-    return replace(tool_def, description=description_du_tool())
-
-
-@agent.tool(prepare=_injecter_schema)
-def interroger_base_nba(ctx: RunContext[TraceSQL], requete: str) -> str:
-    """Exécute une requête SQL de lecture sur la base NBA."""  # remplacée par _injecter_schema
-    with logfire.span("sql_tool", **{"sql.query": requete}) as span:
-        try:
-            resultat = executer_sql(requete)
-        except RequeteRefusee as e:
-            span.set_attribute("sql.refused", str(e))
-            # ModelRetry renvoie le message au modèle, qui corrige sa requête et
-            # réessaie - d'où l'importance de messages d'erreur exploitables.
-            raise ModelRetry(str(e)) from e
-        span.set_attribute("sql.rows_returned", resultat.row_count)
-        span.set_attribute("sql.execution_ms", resultat.execution_ms)
-        span.set_attribute("sql.truncated", resultat.truncated)
-
-    texte = _formater_resultat(resultat)
-    ctx.deps.resultats.append(resultat)
-    ctx.deps.textes.append(texte)
-    return texte
-
-
-def _formater_resultat(resultat: SQLResult) -> str:
-    """Met les lignes en texte pour le modèle : en-tête, puis une ligne par tuple."""
-    if not resultat.rows:
-        return "Aucune ligne : la base ne contient pas cette donnée."
-    entete = " | ".join(resultat.columns)
-    lignes = [" | ".join(str(l[c]) for c in resultat.columns) for l in resultat.rows]
-    texte = "\n".join([entete, *lignes])
-    if resultat.truncated:
-        # Sans cet avertissement, le modèle conclurait « il y a 50 joueurs » sur un LIMIT 50
-        texte += f"\n\n[Coupé à {resultat.row_count} lignes : il en existe davantage.]"
-    return texte
-
-
-def _format_context(search_results: list[SearchResult]) -> str:
-    """Assemble les chunks récupérés en texte pour le prompt, chunk_id visible
-    pour que le modèle puisse le citer dans RAGAnswer.citations."""
+    if not search_results:
+        logging.warning("Aucun contexte trouvé pour cette question.")
+        return MESSAGE_CONTEXTE_VIDE
     return "\n\n---\n\n".join(
-        f"chunk_id: {res.id} | Source: {res.metadata.get('source', 'Inconnue')} (Score: {res.score:.1f}%)\n"
-        f"Contenu: {res.text}"
+        f"Source: {res['metadata'].get('source', 'Inconnue')} (Score: {res['score']:.1f}%)\n"
+        f"Contenu: {res['text']}"
         for res in search_results
-    ) or "Aucune information pertinente trouvée dans la base de connaissances pour cette question."
+    )
 
 
-def verify_citations(answer: RAGAnswer, search_results: list[SearchResult]) -> RAGAnswer:
-    """Retire les chunk_id cités qui n'existent pas dans les chunks récupérés.
-
-    Vérification déterministe faite en code, pas par le LLM (cf. schemas.py) : un
-    chunk_id inventé est un signal d'hallucination. Fonction séparée de
-    generate_answer() pour être testable sans appel API.
-    """
-    valid_ids = {res.id for res in search_results}
-    invalid_citations = [c for c in answer.citations if c not in valid_ids]
-    if invalid_citations:
-        logging.warning(
-            f"Citations invalides (chunk_id absent du contexte récupéré) : {invalid_citations}"
+def generer_reponse(prompt_messages: list[dict]) -> str:
+    """Envoie le prompt (qui inclut le contexte) à l'API Mistral et rend le texte."""
+    if not prompt_messages:
+        logging.warning("Tentative de génération de réponse avec un prompt vide.")
+        return "Je ne peux pas traiter une demande vide."
+    try:
+        logging.info(
+            f"Appel à l'API Mistral modèle '{MODEL_NAME}' avec {len(prompt_messages)} message(s)."
         )
-        answer.citations = [c for c in answer.citations if c in valid_ids]
-    return answer
+        response = client.chat.complete(
+            model=MODEL_NAME,
+            messages=prompt_messages,
+            temperature=TEMPERATURE,
+        )
+        if response.choices and len(response.choices) > 0:
+            logging.info("Réponse reçue de l'API Mistral.")
+            return response.choices[0].message.content
+        logging.warning("L'API n'a pas retourné de choix valide.")
+        return "Désolé, je n'ai pas pu générer de réponse valide pour le moment."
+    except Exception:
+        logging.exception("Erreur API Mistral pendant chat.complete")
+        return "Je suis désolé, une erreur technique m'empêche de répondre. Veuillez réessayer plus tard."
 
 
-def assembler_prompt(
-    search_results: list[SearchResult], question: str, decision: Decision | None
-) -> str:
-    """Assemble le prompt, en n'annonçant la base que si le tool existe pour ce run.
+def generate_answer(search_results: list[dict], question: str) -> str:
+    """Le chemin complet : contexte, prompt, génération. Rend du **texte brut**.
 
-    Séparée de generate_answer() pour être testable sans appel API. `decision=None`
-    rend le comportement d'origine : les deux sources annoncées.
+    Aucune structure, aucune citation vérifiable, aucun signal d'abstention.
     """
-    sql_disponible = decision is None or decision.sql_autorise
-    return SYSTEM_PROMPT.format(
-        context_str=_format_context(search_results),
-        question=question,
-        sources_sql=SOURCE_SQL_PRESENTE if sql_disponible else SOURCE_SQL_ABSENTE,
+    final_prompt = SYSTEM_PROMPT.format(
+        context_str=formater_contexte(search_results), question=question
     )
-
-
-def generate_answer(search_results: list[SearchResult], question: str) -> AnswerWithSQL:
-    """Génère une réponse structurée à partir des chunks récupérés et de la question.
-
-    L'agent dispose des deux sources et choisit : les chunks pour le qualitatif,
-    le tool SQL pour le chiffré. Les requêtes qu'il a réellement exécutées sont
-    relevées dans la trace, puis jointes à la réponse.
-    """
-    # La décision est prise avant l'assemblage : elle commande à la fois les sources
-    # annoncées dans le prompt et l'existence du tool (cf. _injecter_schema)
-    trace = TraceSQL(decision=analyser_couverture(question))
-    user_prompt = assembler_prompt(search_results, question, trace.decision)
-    result = agent.run_sync(user_prompt, deps=trace)
-    answer = verify_citations(result.output, search_results)
-
-    # sql_queries vient de la trace, jamais d'une déclaration du modèle (cf. schemas.py)
-    return AnswerWithSQL(
-        **answer.model_dump(),
-        sql_queries=[r.query for r in trace.resultats],
-        sql_results=trace.textes,
-    )
+    # Un seul message « user » plutôt qu'un message système séparé : Mistral traite bien
+    # un long message utilisateur structuré.
+    return generer_reponse([{"role": "user", "content": final_prompt}])

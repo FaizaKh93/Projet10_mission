@@ -1,9 +1,10 @@
 # eval/evaluate_ragas.py
-"""Évalue le prototype RAG existant (notre copie, jamais P10_DSML) sur eval/testset.json.
+"""Évalue le prototype RAG sur eval/testset.json avec RAGAS.
 
-Système évalué : Mistral (mistral-small-latest) + FAISS, via src/rag/vector_store.py.
-Juge RAGAS : OpenAI gpt-4o (volontairement différent du système évalué, pour éviter
-le biais d'auto-évaluation).
+Système évalué : Mistral (mistral-small-latest) + FAISS, via src/rag/vector_store.py
+et src/rag/generation.py — exactement le chemin qu'emprunte app/chat.py.
+Juge RAGAS : OpenAI gpt-4o, volontairement différent du système évalué pour éviter
+le biais d'auto-évaluation.
 """
 import argparse
 import json
@@ -22,82 +23,36 @@ from dotenv import load_dotenv
 
 load_dotenv()  # charge .env (clés MISTRAL_API_KEY et OPENAI_API_KEY)
 
-# Rend le package src/ importable (config.py, rag/vector_store.py), quel que soit
-# le répertoire depuis lequel ce script est lancé
+# Rend le paquet src/ importable (config.py, rag/*), quel que soit le répertoire
+# depuis lequel ce script est lancé
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import logfire
-
-# --- Système évalué : agent Pydantic AI (Mistral) + FAISS (notre copie, jamais P10_DSML) ---
+# --- Système évalué ---
 from config import SEARCH_K
 from rag.generation import generate_answer
 from rag.vector_store import VectorStoreManager
 
-# --- Juge RAGAS : OpenAI (volontairement différent du système évalué, anti-biais) ---
+# --- Juge RAGAS : OpenAI (différent du système évalué, anti-biais) ---
 from openai import AsyncOpenAI
 from ragas.embeddings import OpenAIEmbeddings
 from ragas.llms import llm_factory
 from ragas.metrics.collections import AnswerCorrectness, ContextPrecision, ContextRecall, Faithfulness
 
-# --- Observabilité Logfire ---
-# NB: ces 2 lignes sont volontairement dupliquées à l'identique dans app/chat.py
-# (pas de module partagé) - si on les modifie ici, penser à faire la même chose là-bas.
-logfire.configure(send_to_logfire="if-token-present")
-logfire.instrument_pydantic_ai()  # trace automatiquement les appels de l'agent (rag/generation.py)
 
-# Le prompt système n'est plus défini ici : il vit dans src/rag/generation.py, partagé
-# avec app/chat.py — c'est ce qui garantit qu'on évalue bien ce que l'app fait vraiment.
-
-
-def query_prototype(vector_store_manager: VectorStoreManager, question: str):
-    """Reproduit exactement la logique de app/chat.py : recherche puis génération."""
-    # Étape 1 : recherche vectorielle FAISS — les k chunks les plus proches sémantiquement de la question
+def query_prototype(vector_store_manager: VectorStoreManager, question: str) -> tuple[list[dict], str]:
+    """Reproduit le chemin de app/chat.py : recherche vectorielle puis génération."""
+    # Étape 1 : les k chunks les plus proches sémantiquement de la question
     search_results = vector_store_manager.search(question, k=SEARCH_K)
-
-    # Étape 2 : génération via l'agent Pydantic AI (assemblage du contexte, prompt et
-    # vérification des citations : tout est dans rag/generation.py)
-    rag_answer = generate_answer(search_results, question)
-
-    # Le juge RAGAS attend une réponse texte. On lui donne la réponse telle que
-    # l'utilisateur la voit dans l'app (réponse + bandeau d'abstention), pour évaluer
-    # la même chose — et parce que la baseline envoyait déjà la sortie complète du
-    # modèle aux 4 métriques : garder une seule chaîne préserve la comparabilité.
-    # `rag_answer.answer` brut reste sauvegardé à part dans les résultats.
-    user_visible_answer = rag_answer.answer
-    if rag_answer.abstain and rag_answer.abstain_reason:
-        user_visible_answer = f"{user_visible_answer}\n\n[Réponse incertaine] {rag_answer.abstain_reason}"
-    answer = user_visible_answer
-
-    # contexts = juste le texte des chunks (sans les métadonnées), c'est ce format que RAGAS attend
-    contexts = [res.text for res in search_results]
-
-    contexts_complets = contexts + provenance_sql(rag_answer.sql_queries, rag_answer.sql_results)
-    return contexts, contexts_complets, answer, rag_answer
-
-
-def provenance_sql(requetes: list[str], resultats: list[str]) -> list[str]:
-    """Apparie chaque requête à son résultat, pour le contexte de faithfulness.
-
-    Le résultat seul ne suffit pas : `pts_total / 2072` ne dit pas de QUI il s'agit,
-    alors que la requête porte `WHERE p.full_name = 'Nikola Jokić'`. De même, « c'est
-    le plus élevé » n'est justifiable que si le juge voit le `ORDER BY ... DESC LIMIT 1`.
-    C'est le couple requête + résultat qui constitue la provenance d'un fait SQL.
-
-    Cela ne rend pas la mesure complaisante : une requête qui somme la saison entière
-    ne justifiera toujours pas une affirmation portant sur une série de playoffs.
-    """
-    return [
-        f"Requête SQL exécutée :\n{requete}\n\nRésultat renvoyé :\n{resultat}"
-        for requete, resultat in zip(requetes, resultats)
-    ]
+    # Étape 2 : assemblage du contexte, prompt et appel du modèle (rag/generation.py)
+    answer = generate_answer(search_results, question)
+    return search_results, answer
 
 
 def interroger_avec_delai(vector_store_manager, question: str, delai: float):
     """Interroge le système en abandonnant au-delà de `delai` secondes.
 
-    Garde-fou du HARNAIS, pas du système : l'agent garde sa configuration
-    d'origine, on refuse seulement d'attendre indéfiniment (le run précédent a
-    perdu C4 sur un blocage de 5 minutes côté Mistral).
+    Garde-fou du HARNAIS, pas du système : le prototype garde sa configuration
+    d'origine, on refuse seulement d'attendre indéfiniment une réponse de l'API.
 
     Python ne peut pas tuer un thread : l'appel abandonné continue en arrière-plan
     jusqu'à son terme. On enregistre l'incident et on passe au cas suivant.
@@ -110,88 +65,38 @@ def interroger_avec_delai(vector_store_manager, question: str, delai: float):
             raise TimeoutError(f"génération abandonnée après {delai} s") from e
 
 
-def recalculer_faithfulness(chemin: Path, faithfulness, pause: float) -> None:
-    """Renote la seule faithfulness d'un run existant, sans rien regénérer.
-
-    Sert quand la définition du CONTEXTE change alors que le système évalué, lui,
-    n'a pas bougé : question, réponse notée, chunks, requêtes SQL et résultats sont
-    déjà dans le fichier. Économie réelle : zéro appel Mistral, et une métrique
-    jugée au lieu de quatre.
-
-    Les trois autres métriques sont laissées intactes : elles ne dépendent pas du
-    contexte élargi (voir le commentaire de chaque métrique dans main()).
-    """
-    if not chemin.exists():
-        raise FileNotFoundError(f"{chemin} introuvable : lancer d'abord un run complet.")
-
-    cas = json.loads(chemin.read_text(encoding="utf-8"))
-    notes = [c for c in cas if "error" not in c]
-
-    for i, c in enumerate(notes, 1):
-        contexte = c["retrieved_contexts"] + provenance_sql(
-            c.get("sql_queries") or [], c.get("sql_results") or []
-        )
-        ancien = c.get("faithfulness")
-        try:
-            c["faithfulness"] = faithfulness.score(
-                user_input=c["question"], response=c["system_response"], retrieved_contexts=contexte
-            ).value
-            print(f"[{i}/{len(notes)}] {c['id']:3} {ancien:.2f} -> {c['faithfulness']:.2f}")
-        except Exception as e:
-            # On conserve l'ancienne note plutôt que de laisser un trou dans le fichier
-            print(f"[{i}/{len(notes)}] {c['id']:3} ÉCHEC, note conservée : {str(e)[:70]}")
-
-        chemin.write_text(json.dumps(cas, ensure_ascii=False, indent=2), encoding="utf-8")
-        if pause and i < len(notes):
-            time.sleep(pause)
-
-    print(f"\n{chemin} mis à jour.")
-
-
 def main(limit: int | None = None, label: str | None = None, force: bool = False,
-         pause: float = 5.0, delai_cas: float = 120.0, rescore: bool = False):
-    # Nom de fichier explicite (ex. "baseline") ou, à défaut, un horodatage — jamais un nom fixe,
-    # pour ne jamais écraser un run précédent (ex. la baseline) par erreur.
+         pause: float = 5.0, delai_cas: float = 120.0):
+    # Nom de fichier explicite (ex. "baseline") ou, à défaut, un horodatage — jamais un
+    # nom fixe, pour ne jamais écraser un run précédent par erreur.
     label = label or datetime.now().strftime("run_%Y%m%d_%H%M%S")
     results_dir = Path(__file__).parent / "results"
     results_dir.mkdir(exist_ok=True)
     out_path = results_dir / f"{label}.json"
 
-    # Garde-fou : refuse d'écraser un fichier de résultats existant sauf si --force est passé explicitement.
-    # Ne s'applique pas à --rescore, dont le principe est justement de réécrire un run existant.
-    if out_path.exists() and not force and not rescore:
+    # Refuse d'écraser un fichier de résultats existant sauf --force explicite.
+    if out_path.exists() and not force:
         raise FileExistsError(
             f"{out_path} existe déjà. Choisissez un autre --label, ou passez --force pour écraser volontairement."
         )
 
-    # Charge les 18 cas de test (question + reference_answer + métadonnées catégorie/modalité)
+    # Charge les cas de test (question + reference_answer + métadonnées)
     testset_path = Path(__file__).parent / "testset.json"
     testset = json.loads(testset_path.read_text(encoding="utf-8"))
     if limit:
-        testset = testset[:limit]  # utile pour tester sur 2-3 cas avant de lancer les 18
+        testset = testset[:limit]  # vérifier le script sur 2-3 cas avant le run complet
 
-    # --rescore : on ne regenere rien. Tout ce dont le juge a besoin est deja dans le
-    # fichier de resultats, donc ni FAISS ni Mistral ne sont charges.
-    if rescore:
-        openai_client = AsyncOpenAI()
-        judge_llm = llm_factory("gpt-4o", client=openai_client, max_tokens=8192)
-        recalculer_faithfulness(out_path, Faithfulness(llm=judge_llm), pause)
-        return
-
-    print(f"Chargement du VectorStoreManager (système évalué)...")
-    vector_store_manager = VectorStoreManager()  # charge l'index FAISS + les 302 chunks depuis data/vector_db/
-    # Plus de client Mistral ici : il est encapsulé dans l'agent de rag/generation.py
+    print("Chargement du VectorStoreManager (système évalué)...")
+    vector_store_manager = VectorStoreManager()  # index FAISS + chunks depuis data/vector_db/
 
     print("Initialisation du juge RAGAS (OpenAI gpt-4o)...")
     openai_client = AsyncOpenAI()  # client asynchrone requis par ragas (score() lance ascore() en interne)
-    # max_tokens relevé (défaut trop bas) : sur les questions à contexte long, le juge doit lister
+    # max_tokens relevé (défaut trop bas) : sur les contextes longs, le juge doit lister
     # beaucoup d'énoncés/verdicts en sortie structurée, et se faisait tronquer sans cette valeur.
-    # gpt-4o supporte jusqu'à 16384 tokens de sortie ; la sortie étant un JSON contraint (Pydantic via
-    # instructor), fixer une valeur haute ne coûte rien de plus — le modèle ne "remplit" pas inutilement.
     judge_llm = llm_factory("gpt-4o", client=openai_client, max_tokens=8192)
-    judge_embeddings = OpenAIEmbeddings(client=openai_client)  # nécessaire pour Answer Correctness (similarité sémantique)
+    judge_embeddings = OpenAIEmbeddings(client=openai_client)  # requis par Answer Correctness
 
-    # Instancie chaque métrique une seule fois (réutilisée pour les 18 questions, pas recréée à chaque tour)
+    # Chaque métrique est instanciée une seule fois, puis réutilisée pour tous les cas
     faithfulness = Faithfulness(llm=judge_llm)
     context_precision = ContextPrecision(llm=judge_llm)
     context_recall = ContextRecall(llm=judge_llm)
@@ -199,45 +104,40 @@ def main(limit: int | None = None, label: str | None = None, force: bool = False
 
     results = []
     for i, case in enumerate(testset, 1):
-        print(f"[{i}/{len(testset)}] {case['id']} — {case['question'][:70]}...")
+        print(f"[{i}/{len(testset)}] {case['id']} - {case['question'][:70]}...")
 
-        # Chaque cas est isolé dans son propre try/except : un échec (ex. limite de tokens dépassée
-        # côté juge) ne doit jamais faire perdre les résultats déjà obtenus (et déjà payés) sur les
-        # cas précédents. On enregistre l'erreur pour ce cas et on continue avec le suivant.
+        # Chaque cas est isolé : un échec (ex. limite de tokens côté juge) ne doit pas
+        # faire perdre les résultats déjà obtenus - et déjà payés - sur les cas précédents.
         try:
-            # Interroge le système évalué (retrieval + génération via l'agent) — voir query_prototype() plus haut
-            contexts, contexts_complets, answer, rag_answer = interroger_avec_delai(
+            search_results, answer = interroger_avec_delai(
                 vector_store_manager, case["question"], delai_cas
             )
+            # RAGAS attend le texte seul des chunks ; les sources sont gardées à part
+            # pour l'analyse, sans avoir à relancer la recherche.
+            contexts = [res["text"] for res in search_results]
+            sources = [res["metadata"].get("source", "Inconnue") for res in search_results]
 
-            # Métrique 1 - Faithfulness : la réponse invente-t-elle des faits absents du contexte
-            # (hallucination) ? Seule métrique nourrie par `contexts_complets` : elle juge la réponse
-            # au regard de TOUT ce dont le système disposait, chunks vectoriels ET résultats SQL.
+            # Métrique 1 - Faithfulness : la réponse invente-t-elle des faits absents du
+            # contexte récupéré (hallucination) ?
             f = faithfulness.score(
-                user_input=case["question"], response=answer, retrieved_contexts=contexts_complets
+                user_input=case["question"], response=answer, retrieved_contexts=contexts
             )
 
-            # Les trois métriques suivantes gardent `contexts` (chunks seuls) : elles mesurent la
-            # qualité du RETRIEVAL, pas celle de la réponse. Y ajouter les résultats SQL gonflerait
-            # mécaniquement la précision et ferait perdre la comparabilité avec baseline et
-            # validation_pydantic, où context_precision sert de témoin du protocole.
-
-            # Métrique 2 - Context Precision : les chunks récupérés sont-ils pertinents par rapport à ce qu'il
-            # fallait retrouver ? Ne regarde PAS la réponse générée, seulement `contexts` vs `reference`.
+            # Métrique 2 - Context Precision : les chunks récupérés sont-ils pertinents au
+            # regard de ce qu'il fallait retrouver ? Ne regarde pas la réponse générée.
             cp = context_precision.score(
                 user_input=case["question"], reference=case["reference_answer"], retrieved_contexts=contexts
             )
 
-            # Métrique 3 - Context Recall : le contexte récupéré contient-il tout ce qu'il faut pour bien
-            # répondre ? Complémentaire de Context Precision (précision vs exhaustivité de la récupération).
+            # Métrique 3 - Context Recall : le contexte contient-il tout ce qu'il faut pour
+            # répondre ? Complémentaire de la précision (exhaustivité vs pertinence).
             cr = context_recall.score(
                 user_input=case["question"], retrieved_contexts=contexts, reference=case["reference_answer"]
             )
 
-            # Métrique 4 - Answer Correctness : la réponse générée correspond-elle à la réponse de référence
-            # (ground truth) ? Combine similarité sémantique + recoupement factuel entre `response` et
-            # `reference`. Contrairement à Answer Relevancy (retirée — voir notes du projet), celle-ci
-            # sanctionne bien un chiffre faux même si la réponse reste "sur le sujet".
+            # Métrique 4 - Answer Correctness : la réponse correspond-elle à la référence ?
+            # Similarité sémantique + recoupement factuel : sanctionne un chiffre faux même
+            # si la réponse reste sur le sujet.
             ac = answer_correctness.score(
                 user_input=case["question"], response=answer, reference=case["reference_answer"]
             )
@@ -252,23 +152,9 @@ def main(limit: int | None = None, label: str | None = None, force: bool = False
                     "evaluation_focus": case["evaluation_focus"],
                     "question": case["question"],
                     "reference_answer": case["reference_answer"],
-                    "system_response": answer,  # = user_visible_answer, la chaîne notée par RAGAS
+                    "system_response": answer,
                     "retrieved_contexts": contexts,
-                    # Champs issus de la sortie structurée (RAGAnswer), stockés séparément :
-                    # ils servent à l'analyse comportementale (taux d'abstention, faux refus),
-                    # calculée sans juge LLM dans le notebook - axe distinct des 4 métriques RAGAS.
-                    # `answer_raw` est conservé sans la justification d'abstention, pour pouvoir
-                    # réanalyser plus tard sans perte d'information.
-                    "answer_raw": rag_answer.answer,
-                    "abstain": rag_answer.abstain,
-                    "abstain_reason": rag_answer.abstain_reason,
-                    "citations": rag_answer.citations,
-                    # Requêtes réellement exécutées : permet d'analyser dans le notebook
-                    # si l'agent a utilisé le tool, et sur quelles questions.
-                    "sql_queries": rag_answer.sql_queries,
-                    # Ce que la base a renvoyé : c'est la part du contexte jugée par la
-                    # faithfulness, donc nécessaire pour relire un score a posteriori.
-                    "sql_results": rag_answer.sql_results,
+                    "retrieved_sources": sources,
                     "faithfulness": f.value,
                     "context_precision": cp.value,
                     "context_recall": cr.value,
@@ -276,16 +162,15 @@ def main(limit: int | None = None, label: str | None = None, force: bool = False
                 }
             )
         except Exception as e:
-            print(f"  ÉCHEC sur {case['id']} : {e}")
+            print(f"  ECHEC sur {case['id']} : {e}")
             results.append({"id": case["id"], "error": str(e)})
 
-        # Sauvegarde après CHAQUE cas (pas seulement à la fin) : si le script plante au cas 15,
-        # les 14 premiers restent sur disque au lieu d'être perdus.
+        # Sauvegarde après CHAQUE cas : si le script s'arrête au cas 15, les 14 premiers
+        # restent sur disque au lieu d'être perdus.
         out_path.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
 
         # Pause entre les cas : gpt-4o est plafonné à 30 000 tokens/minute et un seul cas
-        # consomme une vingtaine d'appels de juge. Sans elle, le run précédent a perdu
-        # B6 et M2 sur des 429, après épuisement des tentatives internes de RAGAS.
+        # consomme une vingtaine d'appels de juge. Sans elle, des cas se perdent sur des 429.
         if pause and i < len(testset):
             time.sleep(pause)
 
@@ -294,20 +179,15 @@ def main(limit: int | None = None, label: str | None = None, force: bool = False
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Évaluation RAGAS du prototype RAG")
-    # --limit N : ne traite que les N premiers cas du testset (pour tester le script sans tout relancer)
+    # --limit N : ne traite que les N premiers cas (pour vérifier le script sans tout relancer)
     parser.add_argument("--limit", type=int, default=None, help="Limiter à N premiers cas (pour test rapide)")
-    # --label : nom du fichier de résultats dans eval/results/ (ex. "baseline", "apres_pydantic")
+    # --label : nom du fichier de résultats dans eval/results/ (ex. "baseline")
     parser.add_argument("--label", type=str, default=None, help="Nom du run (défaut : horodatage automatique)")
-    # --force : autorise explicitement à écraser un fichier de résultats existant portant le même label
+    # --force : autorise explicitement à écraser un fichier de résultats existant
     parser.add_argument("--force", action="store_true", help="Écraser un résultat existant portant le même label")
-    # --pause : secondes d'attente entre deux cas, pour rester sous la limite de tokens/minute du juge
+    # --pause : secondes entre deux cas, pour rester sous la limite de tokens/minute du juge
     parser.add_argument("--pause", type=float, default=5.0, help="Pause entre deux cas en secondes (défaut : 5)")
-    # --delai-cas : abandon d'un cas dont la génération s'éternise, sans toucher à la config de l'agent
+    # --delai-cas : abandon d'un cas dont la génération s'éternise
     parser.add_argument("--delai-cas", type=float, default=120.0, help="Délai maximal de génération par cas (défaut : 120 s)")
-    # --rescore-faithfulness : renote CETTE SEULE metrique sur un run existant, sans regenerer
-    # les reponses. Nom explicite : les trois autres metriques restent telles quelles.
-    parser.add_argument("--rescore-faithfulness", action="store_true",
-                        help="Recalculer la seule faithfulness d'un run existant")
     args = parser.parse_args()
-    main(limit=args.limit, label=args.label, force=args.force, pause=args.pause,
-         delai_cas=args.delai_cas, rescore=args.rescore_faithfulness)
+    main(limit=args.limit, label=args.label, force=args.force, pause=args.pause, delai_cas=args.delai_cas)
