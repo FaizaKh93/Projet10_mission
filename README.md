@@ -318,8 +318,8 @@ pour qu'il fonctionne :
 
 Construite depuis `regular NBA.xlsx` par `scripts/load_excel_to_db.py`, **entièrement
 régénérable**, donc gitignorée comme l'index vectoriel. SQLite pour le faible volume
-(599 lignes), l'usage mono-utilisateur en lecture et l'absence de serveur ; SQLAlchemy
-garde l'architecture portable vers PostgreSQL par simple changement d'URL.
+(1 172 lignes en tout), l'usage mono-utilisateur en lecture et l'absence de serveur ;
+SQLAlchemy garde l'architecture portable vers PostgreSQL par simple changement d'URL.
 
 ```mermaid
 erDiagram
