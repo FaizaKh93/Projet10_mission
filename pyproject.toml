@@ -34,6 +34,7 @@ dev = [
     "jupyter>=1.1.1",
     "matplotlib>=3.11.2",
     "pytest>=8.0",
+    "pytest-cov>=7.1.0",
     "statsmodels>=0.15.0",
 ]
 docs = [
@@ -62,3 +63,21 @@ markers = [
 #     uv run pytest && uv run pytest -m api && uv run pytest -m slow
 # Le pipeline réel n'est pas concerné : scripts/index.py ne charge ni ragas ni logfire
 # (ordre d'import vérifié).
+
+# --- Couverture de code -------------------------------------------------------------
+# Mesurée sur src/ et app/ : le code du système. scripts/ et eval/ en sont exclus,
+# ce sont des points d'entrée qu'on exécute, pas des modules qu'on teste unitairement.
+[tool.coverage.run]
+source = ["src", "app"]
+omit = ["*/__pycache__/*", "*/tests/*"]
+
+[tool.coverage.report]
+# exclude_lines : lignes qu'il serait trompeur de compter comme non couvertes.
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    'if __name__ == "__main__":',
+]
+show_missing = true
+skip_covered = false

@@ -547,7 +547,24 @@ attend, l'**évaluation RAGAS** mesure la qualité des réponses.
 uv run pytest            # 146 tests gratuits, aucun appel réseau, quelques secondes
 uv run pytest -m api     # 40 tests appelant réellement Mistral — PAYANT
 uv run pytest -m slow    # 1 test chargeant le modèle OCR — lent
+
+uv run pytest --cov --cov-report=term-missing --cov-report=html
 ```
+
+La dernière commande écrit un rapport navigable dans `htmlcov/index.html` (gitignoré).
+La couverture globale est de **58 %**, et sa répartition est délibérée :
+
+| Module | Couverture | Pourquoi |
+|---|---|---|
+| `compatibilite.py`, `db_models.py` | **100 %** | le code qui **décide** — testable sans réseau, donc testé exhaustivement |
+| `sql_tool.py`, `schemas.py` | **99 %** | les barrières et les contrats, même raison |
+| `api.py` | 96 % | testée avec simulacres, sans un appel payant |
+| `generation.py` | 90 % | le non-couvert est la branche d'appel réel au modèle |
+| `vector_store.py`, `loaders.py` | 21-22 % | embeddings, FAISS, OCR : couverts par les tests `api` et `slow`, exclus par défaut |
+| `chat.py` | 0 % | interface Streamlit, non testable hors de son harnais |
+
+Le chiffre global est donc tiré vers le bas par les modules d'entrée-sortie. **Tout ce qui
+prend une décision est couvert à 99 % ou plus** — c'est là que porte le risque.
 
 Les trois suites tournent dans des **processus séparés** : importer `torch` après `ragas`
 fait planter l'interpréteur sous Windows (voir le commentaire de `pyproject.toml`).
