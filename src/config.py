@@ -44,6 +44,11 @@ EMBEDDING_BATCH_SIZE = 32           # Taille des lots pour l'API d'embedding
 # --- Configuration de la Recherche ---
 SEARCH_K = 5                        # Nombre de documents à récupérer par défaut
 
+# --- Base NBA (SQLite) ---
+# Régénérable depuis le classeur par scripts/load_excel_to_db.py, donc non versionnée.
+NBA_DB_PATH = os.path.join(PROJECT_ROOT, "data", "nba.db")
+NBA_DB_URL = f"sqlite:///{NBA_DB_PATH}"
+
 # --- Configuration de la Base de Données ---
 DATABASE_DIR = "database"
 DATABASE_FILE = os.path.join(DATABASE_DIR, "interactions.db")

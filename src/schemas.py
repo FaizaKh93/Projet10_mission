@@ -207,3 +207,116 @@ class RAGAnswer(BaseModel):
         if self.abstain and self.abstain_reason:
             return f"{self.answer}\n\n[Réponse incertaine] {self.abstain_reason}".strip()
         return self.answer
+
+
+# ---------------------------------------------------------------- pipeline SQL
+
+class LigneEquipe(BaseModel):
+    """Une franchise, depuis la feuille « Equipe »."""
+
+    code: Annotated[str, StringConstraints(min_length=2, max_length=4, strip_whitespace=True)]
+    name: TexteNonVide
+
+
+class LigneStats(BaseModel):
+    """Une ligne de la feuille « Données NBA », avant insertion.
+
+    Les 43 champs insérés sont couverts : laisser passer `pts_total` — la valeur la
+    plus interrogée — sans contrôle reviendrait à ne valider que la moitié du pipeline.
+
+    Les bornes sont mesurées sur les 569 lignes réelles, avec marge. Deux invariants
+    qu'on serait tenté d'ajouter et qui seraient faux :
+
+    - `REB == OREB + DREB` échoue sur **206 lignes**, avec un écart allant jusqu'à 8 ;
+    - `EFG%` et `TS% <= 100` échoue sur un joueur à 2 tirs sur 2 dont un à 3 points,
+      qui obtient 125 %. Ce sont des mesures **pondérées**, pas des proportions.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    full_name: TexteNonVide
+    team_code: Annotated[str, StringConstraints(min_length=2, max_length=4, strip_whitespace=True)]
+    age: int = Field(ge=15, le=50)
+    games_played: int = Field(ge=1, le=82)  # une saison régulière compte 82 matchs
+
+    # --- Compteurs : positifs par nature ---
+    wins_total: int = Field(ge=0)
+    losses_total: int = Field(ge=0)
+    pts_total: int = Field(ge=0)
+    fgm_total: int = Field(ge=0)
+    fga_total: int = Field(ge=0)
+    three_pm_total: int = Field(ge=0)
+    three_pa_total: int = Field(ge=0)
+    ftm_total: int = Field(ge=0)
+    fta_total: int = Field(ge=0)
+    oreb_total: int = Field(ge=0)
+    dreb_total: int = Field(ge=0)
+    reb_total: int = Field(ge=0)
+    ast_total: int = Field(ge=0)
+    tov_total: int = Field(ge=0)
+    stl_total: int = Field(ge=0)
+    blk_total: int = Field(ge=0)
+    pf_total: int = Field(ge=0)
+    dd2_total: int = Field(ge=0)
+    td3_total: int = Field(ge=0)
+    poss_total: int = Field(ge=0)
+    fp_total: float = Field(ge=0)
+
+    # --- Moyennes par match ---
+    minutes_per_game: float = Field(ge=0, le=48)  # 48 minutes = durée d'un match
+    plus_minus_per_game: float = Field(ge=-100, le=100)
+
+    # --- Proportions strictes ---
+    fg_pct: float = Field(ge=0, le=100)
+    three_p_pct: float = Field(ge=0, le=100)
+    ft_pct: float = Field(ge=0, le=100)
+
+    # --- Mesures pondérées : peuvent dépasser 100 (125 % observé) ---
+    efg_pct: float = Field(ge=0, le=200)
+    ts_pct: float = Field(ge=0, le=200)
+
+    # --- Taux de participation, bornés par construction ---
+    usg_pct: float = Field(ge=0, le=100)
+    ast_pct: float = Field(ge=0, le=100)
+    oreb_pct: float = Field(ge=0, le=100)
+    dreb_pct: float = Field(ge=0, le=100)
+    reb_pct: float = Field(ge=0, le=100)
+    ast_ratio: float = Field(ge=0, le=100)
+    to_ratio: float = Field(ge=0, le=100)
+    ast_to: float = Field(ge=0, le=100)  # ratio passes / pertes, 11 au maximum observé
+
+    # --- Indices par 100 possessions : bornes larges, seules les aberrations sortent ---
+    offrtg: float = Field(ge=0, le=300)
+    defrtg: float = Field(ge=0, le=300)
+    netrtg: float = Field(ge=-300, le=300)  # différence, donc négative possible
+    pace: float = Field(ge=0, le=300)
+    pie: float = Field(ge=-100, le=100)  # impact, négatif possible
+
+    @model_validator(mode="after")
+    def rapports_coherents(self) -> "LigneStats":
+        for reussis, tentes, nom in (
+            (self.fgm_total, self.fga_total, "tirs"),
+            (self.three_pm_total, self.three_pa_total, "tirs à 3 points"),
+            (self.ftm_total, self.fta_total, "lancers francs"),
+        ):
+            if reussis > tentes:
+                raise ValueError(f"{nom} : {reussis} réussis pour {tentes} tentés")
+        if self.wins_total + self.losses_total != self.games_played:
+            raise ValueError(
+                f"{self.wins_total} victoires + {self.losses_total} défaites "
+                f"≠ {self.games_played} matchs joués"
+            )
+        return self
+
+
+class LigneRapport(BaseModel):
+    """Un document qualitatif (PDF Reddit), avant insertion en base.
+
+    Reprend le seuil de `SourceDocument` : une extraction plus courte a échoué, et
+    insérer « Page 1 » en base reviendrait à enregistrer un échec d'OCR comme source.
+    """
+
+    title: Annotated[str, StringConstraints(min_length=3, strip_whitespace=True)]
+    source: Annotated[str, StringConstraints(min_length=2, strip_whitespace=True)]
+    file_name: Annotated[str, StringConstraints(min_length=3, strip_whitespace=True)]
+    content: str = Field(min_length=MIN_CARACTERES_DOCUMENT)
