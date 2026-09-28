@@ -19,6 +19,13 @@ import truststore
 
 truststore.inject_into_ssl()  # magasin de certificats système (proxy/antivirus local)
 
+# Sous Windows, Python retombe sur cp1252 dès que la sortie n'est pas un terminal (une
+# redirection, un `| tee`). Le jeu de test contient « Jokić » : sans cette ligne, le run
+# meurt au cas S3, après avoir déjà payé les deux premiers.
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 from dotenv import load_dotenv
 
 load_dotenv()  # charge .env (clés MISTRAL_API_KEY et OPENAI_API_KEY)
@@ -39,34 +46,40 @@ from ragas.llms import llm_factory
 from ragas.metrics.collections import AnswerCorrectness, ContextPrecision, ContextRecall, Faithfulness
 
 
-def query_prototype(vector_store_manager: VectorStoreManager, question: str) -> tuple[list[dict], str]:
+def query_prototype(vector_store_manager: VectorStoreManager, question: str):
     """Reproduit le chemin de app/chat.py : recherche vectorielle puis génération."""
     # Étape 1 : les k chunks les plus proches sémantiquement de la question
     search_results = vector_store_manager.search(question, k=SEARCH_K)
-    # Étape 2 : assemblage du contexte, prompt et appel du modèle (rag/generation.py)
-    answer = generate_answer(search_results, question)
-    return search_results, answer
+    # Étape 2 : contexte, prompt et appel du modèle, sous contrat (rag/generation.py)
+    reponse = generate_answer(search_results, question)
+    return search_results, reponse
 
 
 def interroger_avec_delai(vector_store_manager, question: str, delai: float):
     """Interroge le système en abandonnant au-delà de `delai` secondes.
 
-    Garde-fou du HARNAIS, pas du système : le prototype garde sa configuration
-    d'origine, on refuse seulement d'attendre indéfiniment une réponse de l'API.
+    Garde-fou du HARNAIS, pas du système : on refuse d'attendre indéfiniment.
 
-    Python ne peut pas tuer un thread : l'appel abandonné continue en arrière-plan
-    jusqu'à son terme. On enregistre l'incident et on passe au cas suivant.
+    Pas de `with ThreadPoolExecutor(...)` : sa sortie appelle `shutdown(wait=True)`,
+    qui **attend le thread bloqué** — délai mesuré à 4 s pour 1 s demandée.
+
+    Python ne peut pas tuer un thread : l'appel abandonné continue en arrière-plan,
+    borné par le délai du client (45 s). Une vraie garantie d'arrêt demanderait une
+    isolation par processus, disproportionnée pour 18 cas.
     """
-    with ThreadPoolExecutor(max_workers=1) as executor:
+    executor = ThreadPoolExecutor(max_workers=1)
+    try:
         futur = executor.submit(query_prototype, vector_store_manager, question)
         try:
             return futur.result(timeout=delai)
         except FuturesTimeout as e:
             raise TimeoutError(f"génération abandonnée après {delai} s") from e
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
 
 
 def main(limit: int | None = None, label: str | None = None, force: bool = False,
-         pause: float = 5.0, delai_cas: float = 120.0):
+         pause: float = 5.0, delai_cas: float = 180.0):
     # Nom de fichier explicite (ex. "baseline") ou, à défaut, un horodatage — jamais un
     # nom fixe, pour ne jamais écraser un run précédent par erreur.
     label = label or datetime.now().strftime("run_%Y%m%d_%H%M%S")
@@ -109,9 +122,13 @@ def main(limit: int | None = None, label: str | None = None, force: bool = False
         # Chaque cas est isolé : un échec (ex. limite de tokens côté juge) ne doit pas
         # faire perdre les résultats déjà obtenus - et déjà payés - sur les cas précédents.
         try:
-            search_results, answer = interroger_avec_delai(
+            search_results, reponse = interroger_avec_delai(
                 vector_store_manager, case["question"], delai_cas
             )
+            # Le juge note ce que l'utilisateur lit, motif d'abstention compris —
+            # noter `answer` seul jugerait une phrase creuse. C'est aussi ce que les
+            # runs précédents notaient, ce qui préserve la comparabilité.
+            answer = reponse.texte_visible()
             # RAGAS attend le texte seul des chunks ; les sources sont gardées à part
             # pour l'analyse, sans avoir à relancer la recherche.
             contexts = [res["text"] for res in search_results]
@@ -155,6 +172,12 @@ def main(limit: int | None = None, label: str | None = None, force: bool = False
                     "system_response": answer,
                     "retrieved_contexts": contexts,
                     "retrieved_sources": sources,
+                    # Sortie structurée, gardée à part pour l'analyse
+                    # comportementale du notebook, qui ne passe par aucun juge.
+                    "answer_raw": reponse.answer,
+                    "abstain": reponse.abstain,
+                    "abstain_reason": reponse.abstain_reason,
+                    "citations": reponse.citations,
                     "faithfulness": f.value,
                     "context_precision": cp.value,
                     "context_recall": cr.value,
@@ -188,6 +211,8 @@ if __name__ == "__main__":
     # --pause : secondes entre deux cas, pour rester sous la limite de tokens/minute du juge
     parser.add_argument("--pause", type=float, default=5.0, help="Pause entre deux cas en secondes (défaut : 5)")
     # --delai-cas : abandon d'un cas dont la génération s'éternise
-    parser.add_argument("--delai-cas", type=float, default=120.0, help="Délai maximal de génération par cas (défaut : 120 s)")
+    # 180 s et non 120 : le validateur de sortie peut relancer le modèle une fois, donc
+    # un cas vaut au pire 2 x 45 s de génération plus 60 s de réessai sur la recherche.
+    parser.add_argument("--delai-cas", type=float, default=180.0, help="Délai maximal de génération par cas (défaut : 180 s)")
     args = parser.parse_args()
     main(limit=args.limit, label=args.label, force=args.force, pause=args.pause, delai_cas=args.delai_cas)

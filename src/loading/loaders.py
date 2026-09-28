@@ -8,30 +8,47 @@ from typing import List, Dict, Optional, Union
 import logging
 import numpy as np
 from tqdm import tqdm # Ajout de tqdm
+from pydantic import ValidationError
+
+from schemas import SourceDocument
 
 # --- Importations pour OCR ---
 try:
     import fitz  # PyMuPDF
     from PIL import Image
-    import easyocr
-
-    # Initialiser le lecteur EasyOCR une seule fois
-    logging.info("Initialisation du lecteur EasyOCR...")
-    reader = easyocr.Reader(['en', 'fr']) 
-    logging.info("Lecteur EasyOCR initialisé.")
-
 except ImportError as e:
-    logging.warning(f"Modules OCR (PyMuPDF, Pillow, easyocr) non installés ou erreur: {e}. L'OCR pour PDF ne sera pas disponible.")
+    logging.warning(f"Modules PDF/image (PyMuPDF, Pillow) non installés: {e}. L'OCR pour PDF ne sera pas disponible.")
     fitz = None
     Image = None
-    easyocr = None
-    reader = None
-except Exception as e:
-    logging.error(f"Erreur inattendue lors du chargement des modules/modèle OCR: {e}")
-    fitz = None
-    Image = None
-    easyocr = None
-    reader = None
+
+# EasyOCR n'est PAS importé ici : `import easyocr` tire PyTorch, et FAISS et PyTorch
+# embarquent chacun leur runtime OpenMP. Chargés ensemble, OpenMP avorte l'interpréteur
+# (« OMP: Error #15 »). Comme pytest importe tous les modules de test à la collecte, un
+# import au niveau module suffisait à faire planter `pytest -m api`. Le contournement
+# officiel (KMP_DUPLICATE_LIB_OK) est non supporté et peut fausser les résultats.
+_ocr_reader = None
+
+
+def get_ocr_reader():
+    """Renvoie le lecteur EasyOCR, en l'initialisant au premier appel réel.
+
+    Renvoie None si EasyOCR est indisponible : l'appelant doit gérer ce cas.
+    """
+    global _ocr_reader
+    if _ocr_reader is None:
+        try:
+            import easyocr  # importé ici : `import easyocr` charge torch, c'est lourd
+
+            logging.info("Initialisation du lecteur EasyOCR...")
+            _ocr_reader = easyocr.Reader(['en', 'fr'])
+            logging.info("Lecteur EasyOCR initialisé.")
+        except ImportError as e:
+            logging.warning(f"easyocr non installé: {e}. L'OCR pour PDF ne sera pas disponible.")
+            return None
+        except Exception as e:
+            logging.error(f"Erreur inattendue lors du chargement du modèle OCR: {e}")
+            return None
+    return _ocr_reader
 
 # Configuration du logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -40,7 +57,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 def extract_text_from_pdf_with_ocr(file_path: str) -> Optional[str]:
     """Extrait le texte d'un fichier PDF en utilisant l'OCR (EasyOCR)."""
-    if not fitz or not reader:
+    ocr_reader = get_ocr_reader()  # charge le modèle seulement maintenant
+    if not fitz or not ocr_reader:
         logging.warning("Modules/Modèle OCR non disponibles. Impossible d'effectuer l'OCR.")
         return None
 
@@ -55,7 +73,7 @@ def extract_text_from_pdf_with_ocr(file_path: str) -> Optional[str]:
             
             try:
                 img_np = np.array(img)
-                results = reader.readtext(img_np)
+                results = ocr_reader.readtext(img_np)
                 page_text = "\n".join([res[1] for res in results])
                 text_content.append(page_text)
                 # logging.info(f"OCR effectuée sur la page {page_num + 1} de {file_path} avec EasyOCR") # Commenté pour éviter le spam de logs avec tqdm
@@ -259,8 +277,8 @@ def load_and_parse_files(input_dir: str, extensions: Optional[set] = None) -> Li
             
             # Si c'est un dictionnaire (plusieurs feuilles Excel), créer un doc par feuille
             if isinstance(extracted_content, dict):
-                for sheet_name, text in extracted_content.items():
-                    documents.append({
+                candidats = [
+                    {
                         "page_content": text,
                         "metadata": {
                             "source": f"{str(relative_path)} (Feuille: {sheet_name})",
@@ -269,9 +287,11 @@ def load_and_parse_files(input_dir: str, extensions: Optional[set] = None) -> Li
                             "category": source_folder,
                             "full_path": str(file_path.resolve())
                         }
-                    })
+                    }
+                    for sheet_name, text in extracted_content.items()
+                ]
             else: # Pour tous les autres types de fichiers
-                 documents.append({
+                candidats = [{
                     "page_content": extracted_content,
                     "metadata": {
                         "source": str(relative_path),
@@ -279,7 +299,18 @@ def load_and_parse_files(input_dir: str, extensions: Optional[set] = None) -> Li
                         "category": source_folder,
                         "full_path": str(file_path.resolve())
                     }
-                })
+                }]
+
+            # Contrat d'ENTRÉE. Un document fautif est écarté, les autres continuent.
+            # Validé mais pas remplacé : détourer ici décalerait le découpage.
+            for doc in candidats:
+                try:
+                    SourceDocument(**doc)
+                except ValidationError as e:
+                    raison = e.errors()[0]["msg"]
+                    logging.warning(f"Document écarté — {doc['metadata']['source']} : {raison}")
+                    continue
+                documents.append(doc)
 
     logging.info(f"{len(documents)} documents chargés et parsés.")
     return documents

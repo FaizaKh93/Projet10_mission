@@ -10,6 +10,7 @@ from typing import List, Dict, Tuple, Optional
 import truststore
 from mistralai.client import Mistral
 from mistralai.client.errors import MistralError
+from mistralai.client.utils.retries import BackoffStrategy, RetryConfig
 
 truststore.inject_into_ssl()  # requis derrière un proxy qui inspecte le TLS
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -21,6 +22,28 @@ from config import (
     MISTRAL_API_KEY, EMBEDDING_MODEL, EMBEDDING_BATCH_SIZE,
     FAISS_INDEX_FILE, DOCUMENT_CHUNKS_FILE, CHUNK_SIZE, CHUNK_OVERLAP
 )
+from pydantic import ValidationError
+
+from schemas import Chunk, LotEmbeddings
+
+# Réessais des échecs TRANSITOIRES seulement (429, 5xx, réseau) : une violation de
+# contrat n'est pas réessayée, la retenter répéterait le bug. Le SDK couvre les bons
+# codes mais ne réessaie rien tant qu'on ne lui passe pas cette configuration.
+#
+# Le `jitter` évite que tous les lots repartent au même instant après un 429. Le budget
+# d'1 min tient compte de ce que ce client sert aussi `search()` : plus long ferait
+# abandonner le cas par le harnais d'évaluation avant que l'API n'ait eu sa chance.
+REESSAI_API = RetryConfig(
+    strategy="backoff",
+    backoff=BackoffStrategy(
+        initial_interval=1_000,    # 1 s avant la première nouvelle tentative
+        max_interval=30_000,       # plafond entre deux tentatives
+        exponent=1.5,
+        max_elapsed_time=60_000,   # au-delà d'1 min sur un lot, on abandonne
+        jitter_ms=500,
+    ),
+    retry_connection_errors=True,
+)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -30,7 +53,7 @@ class VectorStoreManager:
     def __init__(self):
         self.index: Optional[faiss.Index] = None
         self.document_chunks: List[Dict[str, any]] = []
-        self.mistral_client = Mistral(api_key=MISTRAL_API_KEY)
+        self.mistral_client = Mistral(api_key=MISTRAL_API_KEY, retry_config=REESSAI_API)
         self._load_index_and_chunks()
 
     def _load_index_and_chunks(self):
@@ -42,6 +65,13 @@ class VectorStoreManager:
                 logging.info(f"Chargement des chunks depuis {DOCUMENT_CHUNKS_FILE}...")
                 with open(DOCUMENT_CHUNKS_FILE, 'rb') as f:
                     self.document_chunks = pickle.load(f)
+                # Ces deux nombres étaient journalisés côte à côte sans jamais être
+                # comparés : un index et un pickle désaccordés se chargeaient sans erreur.
+                if self.index.ntotal != len(self.document_chunks):
+                    raise ValueError(
+                        f"index et chunks désaccordés : {self.index.ntotal} vecteurs pour "
+                        f"{len(self.document_chunks)} fragments — relancer scripts/index.py"
+                    )
                 logging.info(f"Index ({self.index.ntotal} vecteurs) et {len(self.document_chunks)} chunks chargés.")
             except Exception as e:
                 logging.error(f"Erreur lors du chargement de l'index/chunks: {e}")
@@ -79,7 +109,9 @@ class VectorStoreManager:
                         "start_index": chunk.metadata.get("start_index", -1) # Position de début (en caractères)
                     }
                 }
-                all_chunks.append(chunk_dict)
+                # On stocke la version validée : le détourage est le volet « nettoyage »
+                # du pipeline, et ne peut pas décaler les frontières déjà calculées.
+                all_chunks.append(Chunk(**chunk_dict).model_dump())
             doc_counter += 1
 
         logging.info(f"Total de {len(all_chunks)} chunks créés.")
@@ -110,34 +142,25 @@ class VectorStoreManager:
                     inputs=texts_to_embed
                 )
                 batch_embeddings = [data.embedding for data in response.data]
+                # Contrat de SORTIE. Sans lui, un lot en échec était comblé par des
+                # vecteurs nuls qui préservaient l'alignement, donc passaient inaperçus.
+                LotEmbeddings(vecteurs=batch_embeddings, fragments_envoyes=len(texts_to_embed))
                 all_embeddings.extend(batch_embeddings)
-            except MistralError as e:
-                logging.error(f"Erreur API Mistral lors de la génération d'embeddings (lot {batch_num}): {e}")
-                logging.error(f"  Détails: Status Code={e.status_code}, Message={e.message}")
+            except ValidationError as e:
+                # Échec PERMANENT : réessayer ne changerait rien, et poursuivre
+                # produirait un index désaccordé qui cite le mauvais fragment.
+                raison = e.errors()[0]["msg"]
+                logging.error(f"Lot {batch_num}/{total_batches} — contrat violé : {raison}")
+                raise RuntimeError(
+                    f"embeddings invalides au lot {batch_num}/{total_batches} : {raison}"
+                ) from e
             except Exception as e:
-                logging.error(f"Erreur inattendue lors de la génération d'embeddings (lot {batch_num}): {e}")
-                 # Gérer l'erreur: ici on ajoute des vecteurs nuls pour ne pas bloquer
-                num_failed = len(texts_to_embed)
-                if all_embeddings: # Si on a déjà des embeddings, on prend la dimension du premier
-                    dim = len(all_embeddings[0])
-                else: # Sinon, on ne peut pas déterminer la dimension, on saute ce lot
-                     logging.error("Impossible de déterminer la dimension des embeddings, saut du lot.")
-                     continue
-                logging.warning(f"Ajout de {num_failed} vecteurs nuls de dimension {dim} pour le lot échoué.")
-                all_embeddings.extend([np.zeros(dim, dtype='float32')] * num_failed)
-
-            except Exception as e:
-                logging.error(f"Erreur inattendue lors de la génération d'embeddings (lot {batch_num}): {e}")
-                # Gérer comme ci-dessus
-                num_failed = len(texts_to_embed)
-                if all_embeddings:
-                    dim = len(all_embeddings[0])
-                else:
-                     logging.error("Impossible de déterminer la dimension des embeddings, saut du lot.")
-                     continue
-                logging.warning(f"Ajout de {num_failed} vecteurs nuls de dimension {dim} pour le lot échoué.")
-                all_embeddings.extend([np.zeros(dim, dtype='float32')] * num_failed)
-
+                # Échec TRANSITOIRE déjà réessayé par le SDK selon REESSAI_API : s'il
+                # remonte jusqu'ici, les tentatives sont épuisées.
+                logging.error(f"Lot {batch_num}/{total_batches} en échec après réessais : {e}")
+                raise RuntimeError(
+                    f"génération des embeddings interrompue au lot {batch_num}/{total_batches}"
+                ) from e
 
         if not all_embeddings:
              logging.error("Aucun embedding n'a pu être généré.")
@@ -264,6 +287,9 @@ class VectorStoreManager:
                             continue
 
                         results.append({
+                            # Indispensable aux citations : sans lui le modèle ne peut
+                            # désigner que le fichier, qui compte des dizaines de fragments.
+                            "id": chunk["id"],
                             "score": similarity, # Score de similarité en pourcentage
                             "raw_score": raw_score, # Score brut pour débogage
                             "text": chunk["text"],

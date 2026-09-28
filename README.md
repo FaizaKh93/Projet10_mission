@@ -12,8 +12,15 @@ dispositif qui permet de le juger.
 ## Le système aujourd'hui
 
 ```
-question ──► recherche FAISS ──► 5 fragments ──► mistral-small-latest ──► texte libre
-              100 fragments indexés
+question ──► contrat ──► recherche FAISS ──► 5 fragments ──► mistral-small-latest
+                          100 fragments        contrat            │
+                            indexés                               ▼
+                                                        réponse structurée
+                                                    (texte, citations, abstention)
+                                                              │
+                                                              ▼
+                                            citations vérifiées contre les fragments
+                                              servis — sinon le modèle est relancé
 ```
 
 Les documents sont découpés en fragments de 1 500 caractères, vectorisés par
@@ -25,8 +32,28 @@ classeur en est exclu : la mesure a montré que la feuille contenant les statist
 n'était jamais récupérée, et que ses fragments prenaient sur les questions mixtes des
 places aux fils Reddit. Les chiffres seront atteints autrement.
 
-Ni validation des entrées, ni sortie structurée, ni citation vérifiable, ni mécanisme
-d'abstention — c'est ce que l'évaluation sert à objectiver.
+### Les contrats
+
+Six modèles Pydantic ([src/schemas.py](src/schemas.py)) posés aux frontières :
+
+| Frontière | Ce qui est refusé |
+|---|---|
+| Documents chargés | extraction vide ou résiduelle, source manquante |
+| Fragments découpés | texte vide, identifiant mal formé |
+| **Lot d'embeddings** | lot plus court que ses fragments, **vecteur nul**, dimension changée |
+| Question | question vide ou démesurée |
+| Fragments récupérés | score hors de [-100, 100] |
+| **Réponse** | abstention sans motif |
+
+Le contrat sur les embeddings est le plus important : un lot en échec produisait des
+vecteurs nuls qui préservaient l'alignement, franchissaient tout contrôle de longueur,
+et rendaient les fragments concernés définitivement irrécupérables — leur similarité
+valant 0 pour toute question.
+
+**Les citations ne sont pas prises pour argent comptant.** Un validateur de sortie
+confronte en Python les identifiants cités aux fragments réellement servis et renvoie
+le modèle corriger s'il en invente un. Un contrat Pydantic ne peut pas faire ce
+contrôle : il ne connaît pas le contexte du run.
 
 ---
 
@@ -109,28 +136,43 @@ exécuté.
 
 ## Ce que l'évaluation établit
 
-Deux runs, 18 cas chacun, aucun échec technique :
+Trois runs, 18 cas chacun, aucun échec technique :
 
 | Run | `faithfulness` | `context_precision` | `context_recall` | `answer_correctness` |
 |---|---|---|---|---|
 | `baseline` | 0.408 | 0.165 | 0.435 | 0.196 |
 | `reddit_only` | 0.231 | 0.193 | 0.352 | 0.186 |
+| `pydantic_contracts` | **0.784** | 0.165 | 0.324 | **0.268** |
 
-Constats qui ne dépendent d'aucun jugement de modèle :
+Contrôles qui ne dépendent d'aucun jugement de modèle :
 
-1. **Aucune des huit questions chiffrées n'obtient le bon nombre**, sur les deux runs —
-   contrôle par recherche de la valeur attendue dans la réponse : 0 sur 8.
-2. **La feuille contenant les statistiques n'était jamais récupérée**, bien qu'elle
-   occupât 143 des 302 fragments de l'index initial. Ce sont les feuilles qui
-   *décrivent* les données qui sortaient à sa place — d'où son retrait.
-3. **Retirer le classeur améliore la récupération sur les questions Reddit**
-   (`context_precision` 0.495 → 0.579) mais ne rend pas le système prudent : privé de
-   source, il continue d'affirmer. Les cas notés zéro en `faithfulness` passent de 4 à
-   8, et le seul refus observé disparaît.
+| | `baseline` | `reddit_only` | `pydantic_contracts` |
+|---|---|---|---|
+| Chiffres corrects (/8) | 0 | 0 | 0 |
+| Refus sur les questions sans réponse (/6) | 1 | 0 | **3** |
+| Citations invalides | — | — | **0** |
 
-Les deux manques sont donc distincts : un accès aux données chiffrées, et un mécanisme
-qui empêche de répondre sans source. Le détail et les réserves de méthode sont dans le
-notebook.
+**Ce qui est acquis.** Les contrats et la sortie structurée font passer `faithfulness`
+de 0.408 à 0.784, et de 0.036 à 0.705 sur les questions bruitées — là où le prototype
+inventait le plus. L'abstention devient un champ exploitable au lieu d'une tournure de
+phrase à deviner.
+
+**Ce qui ne l'est pas.** Aucune des huit questions chiffrées n'obtient le bon nombre,
+sur aucun des trois runs : la donnée a quitté l'index et rien ne l'a remplacée. Le
+système a désormais raison de s'abstenir, ce que le jeu de test compte comme six faux
+refus — ils ne deviendront des échecs que si le refus persiste une fois l'accès aux
+chiffres rétabli.
+
+**Une limite à connaître.** Sur Reggie Miller, absent des données, le système fabrique
+des chiffres **en citant deux fragments parfaitement réels**. Une citation prouve la
+provenance de l'identifiant, pas celle du fait.
+
+**Un plancher de bruit, mesuré.** Les runs `reddit_only` et `pydantic_contracts`
+partagent exactement les mêmes contextes (18 cas sur 18), et pourtant leurs métriques
+de récupération diffèrent de 0.028 — l'écart tenant à un seul cas noté 0.833 puis
+0.333. En dessous de ce seuil, un écart n'est pas interprétable.
+
+Le détail et les réserves de méthode sont dans le notebook.
 
 ---
 
@@ -153,9 +195,10 @@ app/chat.py                 interface Streamlit
 scripts/index.py            construction de l'index vectoriel
 src/
   config.py                 chemins, modèles, paramètres de découpage et de recherche
+  schemas.py                les six contrats Pydantic, aux frontières du système
   loading/loaders.py        extraction du texte (PDF/OCR, Excel, CSV, DOCX, TXT)
   rag/vector_store.py       embeddings, index FAISS, recherche
-  rag/generation.py         contexte, prompt, appel du modèle
+  rag/generation.py         contexte, prompt, agent, vérification des citations
 eval/
   testset.json              les 18 cas
   evaluate_ragas.py         exécution du système + notation RAGAS

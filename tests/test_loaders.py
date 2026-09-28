@@ -4,8 +4,13 @@
 Gratuits (aucun appel API). Ils décrivent ce que le pipeline d'indexation donne
 réellement à manger à l'index, puisque c'est ce texte-là qui devient un chunk.
 """
+import subprocess
+import sys
+from pathlib import Path
+
 import pandas as pd
 
+from loading import loaders
 from loading.loaders import (
     extract_text_from_csv,
     extract_text_from_excel,
@@ -62,10 +67,18 @@ def test_txt_et_csv_rendent_leur_contenu(tmp_path):
     assert "2072" in extract_text_from_csv(str(csv))
 
 
+# Le contrat SourceDocument écarte les extractions résiduelles : les fixtures ci-dessous
+# doivent dépasser MIN_CARACTERES_DOCUMENT pour tester le filtre d'extensions, et non
+# la longueur.
+TEXTE_REALISTE = "Haliburton mène les Pacers, et le fil de discussion en parle longuement."
+
+
 def test_extensions_restreint_le_perimetre(tmp_path):
     """Le filtre écarte les fichiers hors périmètre AVANT de les ouvrir."""
-    (tmp_path / "fil.txt").write_text("Haliburton mène les Pacers.", encoding="utf-8")
-    pd.DataFrame({"PTS": [2072]}).to_excel(tmp_path / "stats.xlsx", index=False)
+    (tmp_path / "fil.txt").write_text(TEXTE_REALISTE, encoding="utf-8")
+    pd.DataFrame({"Joueur": ["Tyrese Haliburton"] * 5, "PTS": [2072] * 5}).to_excel(
+        tmp_path / "stats.xlsx", index=False
+    )
 
     tout = load_and_parse_files(str(tmp_path))
     assert {d["metadata"]["filename"] for d in tout} == {"fil.txt", "stats.xlsx"}
@@ -76,5 +89,47 @@ def test_extensions_restreint_le_perimetre(tmp_path):
 
 def test_extensions_none_garde_tout(tmp_path):
     """Sans filtre, le comportement d'origine est inchangé."""
-    (tmp_path / "fil.txt").write_text("texte", encoding="utf-8")
+    (tmp_path / "fil.txt").write_text(TEXTE_REALISTE, encoding="utf-8")
     assert len(load_and_parse_files(str(tmp_path), extensions=None)) == 1
+
+
+def test_import_ne_charge_pas_torch():
+    """Invariant bloquant, vérifié dans un processus neuf.
+
+    FAISS et PyTorch embarquent chacun leur runtime OpenMP. Chargés ensemble, OpenMP
+    avorte l'interpréteur (« OMP: Error #15 », puis « Fatal Python error: Aborted »).
+    Comme pytest importe tous les modules de test à la collecte, un `import easyocr` au
+    niveau de loaders.py suffisait à faire planter `pytest -m api`.
+
+    Le test tourne dans un sous-processus : `sys.modules` est partagé par toute une
+    session pytest, donc l'interroger ici ne prouverait rien sur ce que CE module tire.
+    """
+    code = (
+        "import sys; sys.path.insert(0, 'src');"
+        "import loading.loaders;"
+        "print('torch' in sys.modules or 'easyocr' in sys.modules)"
+    )
+    sortie = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True, text=True,
+        cwd=Path(__file__).resolve().parent.parent,
+    )
+    assert sortie.stdout.strip().endswith("False"), sortie.stdout + sortie.stderr
+
+
+def test_le_lecteur_ocr_est_paresseux():
+    """Le modèle n'est pas construit tant qu'aucun PDF n'est traité."""
+    assert loaders._ocr_reader is None
+
+
+def test_excel_ne_declenche_pas_ocr(tmp_path, monkeypatch):
+    """Traiter un classeur ne doit jamais toucher à l'OCR."""
+    appels = []
+    monkeypatch.setattr(loaders, "get_ocr_reader", lambda: appels.append(1))
+
+    fichier = tmp_path / "test.xlsx"
+    pd.DataFrame({"Joueur": ["Nikola Jokic"] * 5, "PTS": [2072] * 5}).to_excel(fichier, index=False)
+
+    texte = extract_text_from_excel(str(fichier))
+    assert "2072" in texte
+    assert appels == []  # OCR jamais sollicité
