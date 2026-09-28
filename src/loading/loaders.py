@@ -208,10 +208,15 @@ def download_and_extract_zip(url: str, output_dir: str) -> bool:
         logging.error(f"Erreur inattendue lors du téléchargement/extraction: {e}")
         return False
 
-def load_and_parse_files(input_dir: str) -> List[Dict[str, any]]:
+def load_and_parse_files(input_dir: str, extensions: Optional[set] = None) -> List[Dict[str, any]]:
     """
     Charge et parse récursivement les fichiers d'un répertoire.
     Retourne une liste de dictionnaires, chacun représentant un document.
+
+    `extensions` restreint les fichiers retenus (ex. {".pdf"}). Le filtre agit AVANT
+    l'extraction : un fichier écarté n'est jamais ouvert. Laissé à None, tous les
+    formats supportés sont chargés — c'est l'appelant qui décide de la politique, pas
+    ce module.
     """
     documents = []
     input_path = Path(input_dir)
@@ -225,7 +230,11 @@ def load_and_parse_files(input_dir: str) -> List[Dict[str, any]]:
             relative_path = file_path.relative_to(input_path)
             source_folder = relative_path.parts[0] if len(relative_path.parts) > 1 else "root"
             ext = file_path.suffix.lower()
-            
+
+            if extensions is not None and ext not in extensions:
+                logging.info(f"Fichier hors périmètre d'indexation, ignoré: {relative_path}")
+                continue
+
             logging.debug(f"Traitement du fichier: {relative_path} (Dossier source: {source_folder})")
 
             extracted_content = None

@@ -27,6 +27,15 @@ VECTOR_DB_DIR = os.path.join(PROJECT_ROOT, "data", "vector_db")
 FAISS_INDEX_FILE = os.path.join(VECTOR_DB_DIR, "faiss_index.idx")
 DOCUMENT_CHUNKS_FILE = os.path.join(VECTOR_DB_DIR, "document_chunks.pkl")
 
+# Seules les extensions listées ici sont indexées. Le classeur de statistiques en est
+# exclu : l'évaluation a montré que la feuille contenant les données (143 des 302
+# fragments de l'index) n'était jamais récupérée, les feuilles qui *décrivent* les
+# données sortant à sa place. Ces fragments occupaient la moitié de l'index sans jamais
+# être lus, et prenaient sur les questions mixtes des places du top-5 aux fils Reddit.
+# La recherche vectorielle est faite pour du texte narratif ; les chiffres seront
+# atteints autrement.
+EXTENSIONS_INDEXEES = {".pdf"}
+
 CHUNK_SIZE = 1500                   # Taille des chunks en *caractères* (vise ~512 tokens)
 CHUNK_OVERLAP = 150                 # Chevauchement en *caractères*
 EMBEDDING_BATCH_SIZE = 32           # Taille des lots pour l'API d'embedding

@@ -6,7 +6,12 @@ réellement à manger à l'index, puisque c'est ce texte-là qui devient un chun
 """
 import pandas as pd
 
-from loading.loaders import extract_text_from_csv, extract_text_from_excel, extract_text_from_txt
+from loading.loaders import (
+    extract_text_from_csv,
+    extract_text_from_excel,
+    extract_text_from_txt,
+    load_and_parse_files,
+)
 
 
 def test_excel_une_feuille_rend_du_texte_brut(tmp_path):
@@ -55,3 +60,21 @@ def test_txt_et_csv_rendent_leur_contenu(tmp_path):
     csv = tmp_path / "stats.csv"
     csv.write_text("Player,PTS\nNikola Jokic,2072\n", encoding="utf-8")
     assert "2072" in extract_text_from_csv(str(csv))
+
+
+def test_extensions_restreint_le_perimetre(tmp_path):
+    """Le filtre écarte les fichiers hors périmètre AVANT de les ouvrir."""
+    (tmp_path / "fil.txt").write_text("Haliburton mène les Pacers.", encoding="utf-8")
+    pd.DataFrame({"PTS": [2072]}).to_excel(tmp_path / "stats.xlsx", index=False)
+
+    tout = load_and_parse_files(str(tmp_path))
+    assert {d["metadata"]["filename"] for d in tout} == {"fil.txt", "stats.xlsx"}
+
+    txt_seul = load_and_parse_files(str(tmp_path), extensions={".txt"})
+    assert {d["metadata"]["filename"] for d in txt_seul} == {"fil.txt"}
+
+
+def test_extensions_none_garde_tout(tmp_path):
+    """Sans filtre, le comportement d'origine est inchangé."""
+    (tmp_path / "fil.txt").write_text("texte", encoding="utf-8")
+    assert len(load_and_parse_files(str(tmp_path), extensions=None)) == 1
