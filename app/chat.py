@@ -14,7 +14,7 @@ try:
         MISTRAL_API_KEY, MODEL_NAME, SEARCH_K,
         APP_TITLE, NAME
     )
-    from rag.generation import SYSTEM_PROMPT, formater_contexte, generer_reponse
+    from rag.generation import generate_answer
     from rag.vector_store import VectorStoreManager
 except ImportError as e:
     st.error(f"Erreur d'importation: {e}. Vérifiez la structure de vos dossiers et les fichiers dans 'src'.")
@@ -100,30 +100,26 @@ if prompt := st.chat_input(f"Posez votre question sur la {NAME}..."):
         logging.exception(f"Erreur pendant vector_store_manager.search pour la query: {prompt}")
         search_results = []  # On continue sans contexte si la recherche échoue
 
-    # 4. Formater le contexte pour le prompt LLM
-    context_str = formater_contexte(search_results)
-
-    # 5. Construire le prompt final pour l'API Mistral en utilisant le System Prompt RAG
-    final_prompt_for_llm = SYSTEM_PROMPT.format(context_str=context_str, question=prompt)
-
-    # Créer la liste de messages pour l'API (juste le prompt système/utilisateur combiné)
-    messages_for_api = [
-        # On pourrait séparer system et user, mais Mistral gère bien un long message user structuré
-        {"role": "user", "content": final_prompt_for_llm}
-    ]
-
     # === Fin de la logique RAG ===
 
-    # 6. Afficher indicateur + Générer la réponse de l'assistant via LLM
+    # 4. Afficher indicateur + Générer la réponse de l'assistant via LLM
     with st.chat_message("assistant"):
         message_placeholder = st.empty()
         message_placeholder.text("...")  # Indicateur simple
 
-        # Génération de la réponse de l'assistant en utilisant le prompt augmenté
-        response_content = generer_reponse(messages_for_api)
+        # Le contexte, le prompt et l'appel au modèle vivent dans rag/generation.py,
+        # partagés avec l'évaluation : c'est ce qui garantit qu'on évalue bien ce que
+        # cette interface fait réellement.
+        reponse = generate_answer(search_results, prompt)
 
-        # Affichage de la réponse complète
+        # `texte_visible()` = la réponse, suivie du motif si le modèle s'est abstenu
+        response_content = reponse.texte_visible()
         message_placeholder.write(response_content)
+
+        # Les fragments cités, vérifiés en Python avant d'arriver ici : un identifiant
+        # inventé ne peut pas s'y trouver.
+        if reponse.citations:
+            st.caption("Extraits cités : " + ", ".join(reponse.citations))
 
     # 7. Ajouter la réponse de l'assistant à l'historique (pour affichage UI)
     st.session_state.messages.append({"role": "assistant", "content": response_content})

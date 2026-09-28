@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "eval"))
 
 from evaluate_ragas import query_prototype
 from rag.vector_store import VectorStoreManager
+from schemas import RAGAnswer
 
 pytestmark = pytest.mark.api
 
@@ -26,14 +27,21 @@ def vector_store():
 
 
 def test_query_prototype(vector_store):
-    """query_prototype() rend les chunks bruts et la réponse texte."""
-    search_results, answer = query_prototype(
+    """query_prototype() rend les fragments bruts et une réponse structurée."""
+    search_results, reponse = query_prototype(
         vector_store, "Combien de points Nikola Jokić a-t-il marqués ?"
     )
-    # Les chunks arrivent en dicts : c'est ce format que la boucle découpe ensuite
-    # en `retrieved_contexts` (texte) et `retrieved_sources` (métadonnées).
+    # Les fragments arrivent en dicts : c'est ce format que la boucle découpe ensuite en
+    # `retrieved_contexts` (texte) et `retrieved_sources` (métadonnées). `id` est
+    # indispensable aux citations.
     assert isinstance(search_results, list)
     for res in search_results:
-        assert "text" in res and "metadata" in res and "score" in res
-    # La réponse envoyée au juge RAGAS ne doit jamais être vide
-    assert isinstance(answer, str) and answer.strip()
+        assert {"id", "text", "metadata", "score"} <= set(res)
+
+    # La sortie est structurée, plus du texte libre
+    assert isinstance(reponse, RAGAnswer)
+    # La chaîne notée par le juge ne doit jamais être vide
+    assert reponse.texte_visible().strip()
+    # Toute citation rendue a survécu au validateur, donc existe dans le contexte servi
+    ids_servis = {r["id"] for r in search_results}
+    assert set(reponse.citations) <= ids_servis

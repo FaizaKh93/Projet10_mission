@@ -48,6 +48,16 @@ markers = [
 ]
 # Les deux suites se lancent dans leur propre processus :
 #     uv run pytest && uv run pytest -m api
+#
+# ATTENTION - conflit OpenMP. FAISS et PyTorch embarquent chacun leur runtime OpenMP
+# (libomp140.x86_64.dll et libiomp5md.dll). Chargés dans le même processus sous Windows,
+# OpenMP avorte l'interpréteur : « OMP: Error #15 », puis « Fatal Python error: Aborted ».
+# Le contournement KMP_DUPLICATE_LIB_OK=TRUE est documenté comme non supporté et peut
+# fausser les résultats en silence : on ne l'utilise pas.
+# La parade est en amont : src/loading/loaders.py n'importe easyocr - donc torch - qu'au
+# premier OCR réel, et jamais à l'import du module. Un test le vérifie dans un
+# sous-processus (tests/test_loaders.py::test_import_ne_charge_pas_torch), parce que
+# pytest importe TOUS les modules de test à la collecte, y compris ceux qu'il désélectionne.
 
 # --- Couverture de code -------------------------------------------------------------
 # Mesurée sur src/ et app/ : le code du système. scripts/ et eval/ en sont exclus,
