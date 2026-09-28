@@ -176,6 +176,39 @@ Le détail et les réserves de méthode sont dans le notebook.
 
 ---
 
+## Observabilité
+
+[Pydantic Logfire](https://pydantic.dev/logfire) trace la chaîne pas à pas. Chaque
+question produit un arbre de spans :
+
+```
+cas  (id=S2)                 ← un span par question, pendant une évaluation
+  recherche_faiss            ← embedding de la question, puis recherche dans l'index
+  agent run                  ← la génération
+    chat mistral-small…      ← appel au modèle
+    chat mistral-small…      ← relance, si le validateur a refusé une citation
+```
+
+Ce qu'on y voit et que les logs ne donnaient pas : **la relance du validateur de
+citations**, le temps passé dans la recherche par rapport à la génération, et le
+contenu exact envoyé au modèle.
+
+L'agent est instrumenté automatiquement (`logfire.instrument_pydantic_ai()`). La
+recherche, le découpage et les embeddings portent des spans explicites : Logfire ne
+voit pas ce code, qui n'est ni un appel HTTP ni un agent.
+
+**Rien n'est envoyé sans token.** `send_to_logfire="if-token-present"` : sans
+identifiants, le code tourne à l'identique et n'émet rien — c'est ce qui permet aux
+tests de passer sans dépendre d'un compte.
+
+Pour activer :
+
+```bash
+uv run logfire auth      # ouvre le navigateur, écrit .logfire/ (déjà dans .gitignore)
+```
+
+---
+
 ## Tests
 
 ```bash

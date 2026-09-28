@@ -133,3 +133,125 @@ def test_excel_ne_declenche_pas_ocr(tmp_path, monkeypatch):
     texte = extract_text_from_excel(str(fichier))
     assert "2072" in texte
     assert appels == []  # OCR jamais sollicité
+
+
+# --- PDF, DOCX, ZIP : les formats que le pipeline sait lire --------------------------
+
+
+def pdf_avec_texte(chemin, texte):
+    """Fabrique un vrai PDF contenant du texte, via PyMuPDF."""
+    import fitz
+
+    doc = fitz.open()
+    doc.new_page().insert_text((72, 100), texte)
+    doc.save(str(chemin))
+    doc.close()
+    return str(chemin)
+
+
+def test_pdf_texte_extrait_sans_ocr(tmp_path, monkeypatch):
+    """Un PDF qui porte assez de texte ne doit PAS déclencher l'OCR — sinon chaque
+    indexation paierait des dizaines de secondes de modèle pour rien."""
+    appels = []
+    monkeypatch.setattr(loaders, "extract_text_from_pdf_with_ocr", lambda p: appels.append(p))
+
+    chemin = pdf_avec_texte(tmp_path / "long.pdf", "Cade Cunningham mène les Pistons. " * 10)
+    texte = loaders.extract_text_from_pdf(chemin)
+
+    assert "Cade Cunningham" in texte
+    assert appels == []
+
+
+def test_pdf_pauvre_en_texte_bascule_sur_l_ocr(tmp_path, monkeypatch):
+    """Sous 100 caractères, le pipeline suppose un PDF scanné et tente l'OCR.
+
+    C'est le cas de nos quatre fils Reddit, qui sont des captures d'écran.
+    """
+    monkeypatch.setattr(loaders, "extract_text_from_pdf_with_ocr", lambda p: "texte venu de l'OCR")
+
+    chemin = pdf_avec_texte(tmp_path / "court.pdf", "Trop court.")
+    assert loaders.extract_text_from_pdf(chemin) == "texte venu de l'OCR"
+
+
+def test_pdf_illisible_tente_l_ocr_puis_abandonne(tmp_path, monkeypatch):
+    """Un fichier corrompu ne doit pas interrompre l'indexation : None, et on passe."""
+    monkeypatch.setattr(loaders, "extract_text_from_pdf_with_ocr", lambda p: None)
+
+    fichier = tmp_path / "casse.pdf"
+    fichier.write_text("ceci n'est pas un PDF", encoding="utf-8")
+    assert loaders.extract_text_from_pdf(str(fichier)) is None
+
+
+def test_docx_extrait_ses_paragraphes(tmp_path):
+    import docx
+
+    d = docx.Document()
+    d.add_paragraph("Haliburton mène les Pacers.")
+    d.add_paragraph("Deuxième paragraphe.")
+    chemin = tmp_path / "note.docx"
+    d.save(str(chemin))
+
+    texte = loaders.extract_text_from_docx(str(chemin))
+    assert "Haliburton" in texte and "Deuxième paragraphe." in texte
+
+
+def test_zip_telecharge_et_extrait(tmp_path, monkeypatch):
+    """Le téléchargement est simulé : aucun accès réseau dans les tests."""
+    import io
+    import zipfile
+
+    tampon = io.BytesIO()
+    with zipfile.ZipFile(tampon, "w") as z:
+        z.writestr("fil.txt", "contenu du fil")
+
+    class Reponse:
+        content = tampon.getvalue()
+        def raise_for_status(self): pass
+
+    monkeypatch.setattr(loaders.requests, "get", lambda url, stream=False: Reponse())
+
+    assert loaders.download_and_extract_zip("http://exemple/inputs.zip", str(tmp_path))
+    assert (tmp_path / "fil.txt").read_text(encoding="utf-8") == "contenu du fil"
+
+
+def test_zip_sans_url_refuse(tmp_path):
+    assert loaders.download_and_extract_zip("", str(tmp_path)) is False
+
+
+def test_zip_invalide_refuse(tmp_path, monkeypatch):
+    class Reponse:
+        content = b"ceci n'est pas une archive"
+        def raise_for_status(self): pass
+
+    monkeypatch.setattr(loaders.requests, "get", lambda url, stream=False: Reponse())
+    assert loaders.download_and_extract_zip("http://exemple/x.zip", str(tmp_path)) is False
+
+
+def test_format_non_supporte_ignore(tmp_path):
+    """Un format inconnu est sauté avec un avertissement, pas une exception."""
+    (tmp_path / "image.png").write_bytes(b"\x89PNG\r\n")
+    (tmp_path / "bon.txt").write_text(TEXTE_REALISTE, encoding="utf-8")
+
+    docs = load_and_parse_files(str(tmp_path))
+    assert [d["metadata"]["filename"] for d in docs] == ["bon.txt"]
+
+
+def test_repertoire_inexistant_rend_une_liste_vide():
+    assert load_and_parse_files("dossier/qui/n/existe/pas") == []
+
+
+def test_ocr_indisponible_rend_none(monkeypatch):
+    """Si easyocr manque, `get_ocr_reader()` doit rendre None et laisser l'appelant
+    gérer, plutôt que de faire échouer l'import du module."""
+    import builtins
+
+    monkeypatch.setattr(loaders, "_ocr_reader", None)
+    vrai_import = builtins.__import__
+
+    def import_sans_easyocr(nom, *a, **k):
+        if nom == "easyocr":
+            raise ImportError("easyocr non installé")
+        return vrai_import(nom, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", import_sans_easyocr)
+    assert loaders.get_ocr_reader() is None
