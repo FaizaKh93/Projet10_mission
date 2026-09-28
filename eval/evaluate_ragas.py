@@ -15,6 +15,7 @@ from concurrent.futures import TimeoutError as FuturesTimeout
 from datetime import datetime
 from pathlib import Path
 
+import logfire
 import truststore
 
 truststore.inject_into_ssl()  # magasin de certificats système (proxy/antivirus local)
@@ -33,6 +34,15 @@ load_dotenv()  # charge .env (clés MISTRAL_API_KEY et OPENAI_API_KEY)
 # Rend le paquet src/ importable (config.py, rag/*), quel que soit le répertoire
 # depuis lequel ce script est lancé
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+
+# --- Observabilité Logfire ---
+# Ces 2 lignes sont volontairement dupliquées à l'identique dans chaque point d'entrée,
+# sans module partagé : une divergence n'affecterait que la qualité des traces, jamais
+# les réponses ni les scores.
+# send_to_logfire="if-token-present" : rien n'est envoyé tant qu'aucun token n'est
+# configuré, plutôt que d'échouer ou de réclamer une authentification.
+logfire.configure(send_to_logfire="if-token-present")
+logfire.instrument_pydantic_ai()  # trace l'agent, ses relances et ses appels modèle
 
 # --- Système évalué ---
 from config import SEARCH_K
@@ -122,9 +132,12 @@ def main(limit: int | None = None, label: str | None = None, force: bool = False
         # Chaque cas est isolé : un échec (ex. limite de tokens côté juge) ne doit pas
         # faire perdre les résultats déjà obtenus - et déjà payés - sur les cas précédents.
         try:
-            search_results, reponse = interroger_avec_delai(
-                vector_store_manager, case["question"], delai_cas
-            )
+            # Un span par cas : le tableau de bord regroupe alors recherche,
+            # génération et relances éventuelles sous l'identifiant du cas.
+            with logfire.span("cas", id=case["id"], categorie=case["categorie"]):
+                search_results, reponse = interroger_avec_delai(
+                    vector_store_manager, case["question"], delai_cas
+                )
             # Le juge note ce que l'utilisateur lit, motif d'abstention compris —
             # noter `answer` seul jugerait une phrase creuse. C'est aussi ce que les
             # runs précédents notaient, ce qui préserve la comparabilité.

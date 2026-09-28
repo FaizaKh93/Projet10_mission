@@ -2,6 +2,7 @@
 import os
 import pickle
 import faiss
+import logfire
 import numpy as np
 import logging
 from typing import List, Dict, Tuple, Optional
@@ -80,6 +81,7 @@ class VectorStoreManager:
         else:
             logging.warning("Fichiers d'index Faiss ou de chunks non trouvés. L'index est vide.")
 
+    @logfire.instrument("decoupage")
     def _split_documents_to_chunks(self, documents: List[Dict[str, any]]) -> List[Dict[str, any]]:
         """Découpe les documents en chunks avec métadonnées."""
         logging.info(f"Découpage de {len(documents)} documents en chunks (taille={CHUNK_SIZE}, chevauchement={CHUNK_OVERLAP})...")
@@ -117,6 +119,7 @@ class VectorStoreManager:
         logging.info(f"Total de {len(all_chunks)} chunks créés.")
         return all_chunks
 
+    @logfire.instrument("embeddings")
     def _generate_embeddings(self, chunks: List[Dict[str, any]]) -> Optional[np.ndarray]:
         """Génère les embeddings pour une liste de chunks via l'API Mistral."""
         if not MISTRAL_API_KEY:
@@ -229,6 +232,10 @@ class VectorStoreManager:
         except Exception as e:
             logging.error(f"Erreur lors de la sauvegarde de l'index/chunks: {e}")
 
+    # Logfire trace automatiquement les appels Pydantic AI, mais pas ce code
+    # d'embedding et de recherche FAISS : sans ce span, la moitié de la chaîne reste
+    # invisible dans le tableau de bord. Le décorateur évite de réindenter la méthode.
+    @logfire.instrument("recherche_faiss", extract_args=["query_text", "k"])
     def search(self, query_text: str, k: int = 5, min_score: float = None) -> List[Dict[str, any]]:
         """
         Recherche les k chunks les plus pertinents pour une requête.

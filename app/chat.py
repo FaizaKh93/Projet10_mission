@@ -3,6 +3,7 @@ import sys
 import logging
 from pathlib import Path
 
+import logfire
 import streamlit as st
 
 # Rend le paquet src/ importable quel que soit le répertoire de lancement.
@@ -23,6 +24,16 @@ except ImportError as e:
 
 # --- Configuration du Logging ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(module)s - %(message)s')
+
+# --- Observabilité Logfire ---
+# Ces 2 lignes sont volontairement dupliquées à l'identique dans chaque point d'entrée,
+# sans module partagé : une divergence n'affecterait que la qualité des traces, jamais
+# les réponses ni les scores.
+# send_to_logfire="if-token-present" : rien n'est envoyé tant qu'aucun token n'est
+# configuré, plutôt que d'échouer ou de réclamer une authentification.
+logfire.configure(send_to_logfire="if-token-present")
+logfire.instrument_pydantic_ai()  # trace l'agent, ses relances et ses appels modèle
+
 
 # --- Configuration de l'API Mistral ---
 # Le client lui-même vit dans rag/generation.py, partagé avec l'évaluation.
