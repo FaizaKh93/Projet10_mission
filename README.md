@@ -13,12 +13,17 @@ dispositif qui permet de le juger.
 
 ```
 question ──► recherche FAISS ──► 5 fragments ──► mistral-small-latest ──► texte libre
-              302 fragments indexés
+              100 fragments indexés
 ```
 
 Les documents sont découpés en fragments de 1 500 caractères, vectorisés par
 `mistral-embed`, stockés dans un index FAISS. À chaque question, les cinq fragments les
 plus proches sont insérés dans un prompt et le modèle rédige.
+
+**Seuls les fils Reddit sont indexés** (`EXTENSIONS_INDEXEES` dans `src/config.py`). Le
+classeur en est exclu : la mesure a montré que la feuille contenant les statistiques
+n'était jamais récupérée, et que ses fragments prenaient sur les questions mixtes des
+places aux fils Reddit. Les chiffres seront atteints autrement.
 
 Ni validation des entrées, ni sortie structurée, ni citation vérifiable, ni mécanisme
 d'abstention — c'est ce que l'évaluation sert à objectiver.
@@ -104,23 +109,27 @@ exécuté.
 
 ## Ce que l'évaluation établit
 
-Run `baseline`, 18 cas, aucun échec technique :
+Deux runs, 18 cas chacun, aucun échec technique :
 
-| `faithfulness` | `context_precision` | `context_recall` | `answer_correctness` |
-|---|---|---|---|
-| 0.408 | 0.165 | 0.435 | 0.196 |
+| Run | `faithfulness` | `context_precision` | `context_recall` | `answer_correctness` |
+|---|---|---|---|---|
+| `baseline` | 0.408 | 0.165 | 0.435 | 0.196 |
+| `reddit_only` | 0.231 | 0.193 | 0.352 | 0.186 |
 
-Trois constats qui ne dépendent d'aucun jugement de modèle :
+Constats qui ne dépendent d'aucun jugement de modèle :
 
-1. **Aucune des huit questions chiffrées n'obtient le bon nombre** — contrôle par
-   recherche de la valeur attendue dans la réponse : 0 sur 8.
-2. **La feuille contenant les statistiques n'est jamais récupérée**, bien qu'elle
-   occupe 143 des 302 fragments de l'index. Ce sont les feuilles qui *décrivent* les
-   données qui sortent à sa place.
-3. **Cinq des six questions bruitées reçoivent une réponse affirmative et fausse**,
-   dont un total de points entièrement fabriqué pour un joueur absent des données.
+1. **Aucune des huit questions chiffrées n'obtient le bon nombre**, sur les deux runs —
+   contrôle par recherche de la valeur attendue dans la réponse : 0 sur 8.
+2. **La feuille contenant les statistiques n'était jamais récupérée**, bien qu'elle
+   occupât 143 des 302 fragments de l'index initial. Ce sont les feuilles qui
+   *décrivent* les données qui sortaient à sa place — d'où son retrait.
+3. **Retirer le classeur améliore la récupération sur les questions Reddit**
+   (`context_precision` 0.495 → 0.579) mais ne rend pas le système prudent : privé de
+   source, il continue d'affirmer. Les cas notés zéro en `faithfulness` passent de 4 à
+   8, et le seul refus observé disparaît.
 
-Le détail, les réserves de méthode et les limites de chaque métrique sont dans le
+Les deux manques sont donc distincts : un accès aux données chiffrées, et un mécanisme
+qui empêche de répondre sans source. Le détail et les réserves de méthode sont dans le
 notebook.
 
 ---

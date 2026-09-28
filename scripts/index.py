@@ -9,7 +9,7 @@ import argparse
 import logging
 from typing import Optional
 
-from config import INPUT_DIR # INPUT_DATA_URL (décommentez si besoin)
+from config import EXTENSIONS_INDEXEES, INPUT_DIR # INPUT_DATA_URL (décommentez si besoin)
 from loading.loaders import download_and_extract_zip, load_and_parse_files
 from rag.vector_store import VectorStoreManager
 
@@ -33,7 +33,10 @@ def run_indexing(input_directory: str, data_url: Optional[str] = None):
 
     # --- Étape 2: Chargement et Parsing des Fichiers ---
     logging.info(f"Chargement et parsing des fichiers depuis: {input_directory}")
-    documents = load_and_parse_files(input_directory)
+    logging.info(f"Extensions indexées: {sorted(EXTENSIONS_INDEXEES)}")
+    # Le périmètre est déclaré dans config.py : l'indexation applique une politique,
+    # elle ne la choisit pas.
+    documents = load_and_parse_files(input_directory, extensions=EXTENSIONS_INDEXEES)
 
     if not documents:
         logging.warning("Aucun document n'a été chargé ou parsé. Vérifiez le contenu du dossier d'entrée.")
