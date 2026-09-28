@@ -60,10 +60,11 @@ markers = [
 # pytest importe TOUS les modules de test à la collecte, y compris ceux qu'il désélectionne.
 
 # --- Couverture de code -------------------------------------------------------------
-# Mesurée sur src/ et app/ : le code du système. scripts/ et eval/ en sont exclus,
-# ce sont des points d'entrée qu'on exécute, pas des modules qu'on teste unitairement.
+# Mesurée sur src/, app/ et scripts/ : le code du système et ses pipelines. eval/ en est
+# exclu — c'est un harnais qu'on exécute, dont la boucle est répétée à blanc avant
+# chaque run plutôt que testée unitairement.
 [tool.coverage.run]
-source = ["src", "app"]
+source = ["src", "app", "scripts"]
 omit = ["*/__pycache__/*", "*/tests/*"]
 
 [tool.coverage.report]
