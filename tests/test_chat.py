@@ -39,7 +39,7 @@ def app(monkeypatch):
     Les doubles sont posés sur les modules importés, pas sur le script : celui-ci les
     résout au moment de son exécution par AppTest.
     """
-    from rag import generation, vector_store
+    from rag import generation, pipeline, vector_store
 
     monkeypatch.setattr(vector_store.VectorStoreManager, "__init__", lambda self: None)
     monkeypatch.setattr(vector_store.VectorStoreManager, "index",
@@ -49,8 +49,15 @@ def app(monkeypatch):
     monkeypatch.setattr(vector_store.VectorStoreManager, "search",
                         lambda self, q, k=5: FRAGMENTS, raising=False)
 
-    def lancer(charge):
+    def lancer(charge, source="documents"):
         monkeypatch.setattr(generation.agent, "model", FunctionModel(modele_rendant(charge)))
+        # Le routeur aussi est un appel de modèle : sans ce double, il partirait vers
+        # la vraie API — ce qui est arrivé, et n'avait été trahi que par le temps
+        # d'exécution de la suite.
+        monkeypatch.setattr(
+            pipeline, "router",
+            lambda question: pipeline.Route(source=source, motif="décision simulée"),
+        )
         # `@st.cache_resource` survit d'un test à l'autre dans le même processus : sans
         # ce vidage, le gestionnaire mis en cache par un test précédent serait réutilisé
         # et les tests deviendraient dépendants de leur ordre.

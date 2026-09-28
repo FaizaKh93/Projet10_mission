@@ -15,7 +15,7 @@ try:
         MISTRAL_API_KEY, MODEL_NAME, SEARCH_K,
         APP_TITLE, NAME
     )
-    from rag.generation import generate_answer
+    from rag.pipeline import repondre
     from rag.vector_store import VectorStoreManager
 except ImportError as e:
     st.error(f"Erreur d'importation: {e}. Vérifiez la structure de vos dossiers et les fichiers dans 'src'.")
@@ -101,36 +101,39 @@ if prompt := st.chat_input(f"Posez votre question sur la {NAME}..."):
         logging.error("VectorStoreManager non disponible pour la recherche.")
         st.stop()  # On arrête ici car on ne peut pas faire de RAG
 
-    # 3. Rechercher le contexte dans le Vector Store
-    try:
-        logging.info(f"Recherche de contexte pour la question: '{prompt}' avec k={SEARCH_K}")
-        search_results = vector_store_manager.search(prompt, k=SEARCH_K)
-        logging.info(f"{len(search_results)} chunks trouvés dans le Vector Store.")
-    except Exception as e:
-        st.error(f"Une erreur est survenue lors de la recherche d'informations pertinentes: {e}")
-        logging.exception(f"Erreur pendant vector_store_manager.search pour la query: {prompt}")
-        search_results = []  # On continue sans contexte si la recherche échoue
-
     # === Fin de la logique RAG ===
 
-    # 4. Afficher indicateur + Générer la réponse de l'assistant via LLM
+    # 3. Afficher indicateur + dérouler la chaîne
     with st.chat_message("assistant"):
         message_placeholder = st.empty()
         message_placeholder.text("...")  # Indicateur simple
 
-        # Le contexte, le prompt et l'appel au modèle vivent dans rag/generation.py,
-        # partagés avec l'évaluation : c'est ce qui garantit qu'on évalue bien ce que
-        # cette interface fait réellement.
-        reponse = generate_answer(search_results, prompt)
+        # Routage, collecte et réponse vivent dans rag/pipeline.py, partagé avec
+        # l'évaluation : c'est ce qui garantit qu'on évalue bien ce que cette
+        # interface fait réellement.
+        resultat = repondre(vector_store_manager, prompt)
+        reponse = resultat.reponse
 
         # `texte_visible()` = la réponse, suivie du motif si le modèle s'est abstenu
         response_content = reponse.texte_visible()
         message_placeholder.write(response_content)
 
+        # La source retenue, décidée avant toute collecte
+        sources_lisibles = {"documents": "discussions Reddit", "base": "base de données",
+                            "les_deux": "discussions Reddit et base de données",
+                            "aucune": "aucune source"}
+        st.caption(f"Source consultée : {sources_lisibles[resultat.route.source]}")
+
         # Les fragments cités, vérifiés en Python avant d'arriver ici : un identifiant
         # inventé ne peut pas s'y trouver.
         if reponse.citations:
             st.caption("Extraits cités : " + ", ".join(reponse.citations))
+
+        # Les requêtes réellement exécutées, dépliables pour qui veut vérifier
+        if resultat.requetes:
+            with st.expander(f"{len(resultat.requetes)} requête(s) SQL exécutée(s)"):
+                for r in resultat.requetes:
+                    st.code(r.requete, language="sql")
 
     # 7. Ajouter la réponse de l'assistant à l'historique (pour affichage UI)
     st.session_state.messages.append({"role": "assistant", "content": response_content})

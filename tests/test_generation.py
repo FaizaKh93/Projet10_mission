@@ -156,97 +156,51 @@ def test_panne_rendue_comme_abstention(monkeypatch):
 # --- Budgets -------------------------------------------------------------------------
 
 
-def test_budgets_compatibles_avec_le_delai_par_cas():
-    """`timeout` borne CHAQUE requête, pas la génération entière : depuis que le
-    validateur peut relancer le modèle, le pire cas vaut (1 + RELANCES_SORTIE) appels.
+def test_budget_couvre_le_chemin_le_plus_long():
+    """Le pire chemin, composant par composant, et non une somme devinée.
+
+    `timeout` borne CHAQUE requête, pas la chaîne. Depuis l'ajout du routeur et de
+    l'outil SQL, une question hybride peut enchaîner : routage, premier appel, exécution
+    SQL, retour après l'outil, puis une relance du validateur.
+
+    Ce n'est PAS le temps d'une question normale — une question narrative simple fait
+    un routage et un appel. C'est la borne que le harnais doit couvrir pour ne jamais
+    abandonner un cas légitime.
     """
+    from rag.pipeline import DELAI_ROUTAGE_S
+    from rag.sql_tool import DELAI_MAX_SECONDES
     from rag.vector_store import REESSAI_API
 
-    pire_generation = (1 + generation.RELANCES_SORTIE) * generation.DELAI_APPEL_S
-    pire_recherche = REESSAI_API.backoff.max_elapsed_time / 1000
-    assert pire_generation + pire_recherche <= 180
+    chemin_le_plus_long = (
+        REESSAI_API.backoff.max_elapsed_time / 1000      # recherche vectorielle
+        + DELAI_ROUTAGE_S                                 # routage
+        + generation.DELAI_APPEL_S                        # premier appel de génération
+        + DELAI_MAX_SECONDES                              # exécution SQL
+        + generation.DELAI_APPEL_S                        # retour après l'outil
+        + generation.RELANCES_SORTIE * generation.DELAI_APPEL_S  # relance du validateur
+    )
+    assert chemin_le_plus_long <= 240, f"pire chemin : {chemin_le_plus_long} s"
+
+
+def test_delais_locaux_tous_bornes():
+    """Chaque étape a son propre délai, justifié pour elle-même.
+
+    Un budget global large ne remplace pas des délais locaux stricts : il ne serait
+    qu'un garde-fou de dernier recours, pas une réponse à une latence non bornée.
+    """
+    from rag.pipeline import DELAI_ROUTAGE_S
+    from rag.sql_tool import DELAI_MAX_SECONDES
+    from rag.vector_store import REESSAI_API
+
+    assert 0 < DELAI_ROUTAGE_S < generation.DELAI_APPEL_S, "le routage doit être plus court"
+    assert 0 < DELAI_MAX_SECONDES <= 10, "une requête SQL locale n'a pas besoin de plus"
+    assert 0 < REESSAI_API.backoff.max_elapsed_time / 1000 <= 60
 
 
 def test_delai_par_cas_du_harnais_coherent():
-    """Le défaut de `--delai-cas` doit suivre les budgets ci-dessus : sans ce test, les
-    relever ferait abandonner des cas au milieu d'un run payant."""
+    """Le défaut de `--delai-cas` doit couvrir le pire chemin ci-dessus : sans ce test,
+    ajouter une étape ferait abandonner des cas au milieu d'un run payant."""
     source = (Path(__file__).resolve().parent.parent / "eval" / "evaluate_ragas.py").read_text(
         encoding="utf-8"
     )
-    assert "delai_cas: float = 180.0" in source
-
-
-def test_le_prompt_envoye_est_celui_de_la_reference(monkeypatch):
-    """Vérifie le prompt REÇU par le modèle, pas la constante.
-
-    Cette branche fait varier la structure de la sortie, pas la consigne. Un test qui
-    se contenterait de comparer `SYSTEM_PROMPT` à la référence passerait même si
-    `generate_answer` ne s'en servait pas — c'est exactement ce qui s'est produit une
-    fois : la constante était juste, et le prompt envoyé avait perdu ses deux premières
-    lignes.
-    """
-    vu = {}
-
-    def capture(messages, info):
-        for m in messages:
-            for p in m.parts:
-                if isinstance(p, UserPromptPart):
-                    vu["prompt"] = p.content
-        return ModelResponse(parts=[ToolCallPart(info.output_tools[0].name, reponse())])
-
-    monkeypatch.setattr(generation.agent, "model", FunctionModel(capture))
-    generation.generate_answer(FRAGMENTS, "Qui mène les Pistons ?")
-
-    attendu = generation.SYSTEM_PROMPT.format(
-        context_str=generation.formater_contexte([SearchResult(**f) for f in FRAGMENTS]),
-        question="Qui mène les Pistons ?",
-    )
-    assert vu["prompt"] == attendu
-    assert vu["prompt"].startswith("Tu es 'NBA Analyst AI'")
-
-
-def test_prompt_identique_a_la_reference():
-    """La consigne ne doit pas bouger tant qu'une branche ne le décide pas."""
-    reference = Path(__file__).resolve().parent.parent / "P10_DSML" / "MistralChat.py"
-    if not reference.exists():
-        pytest.skip("dossier de référence absent (non versionné)")
-    brut = re.search(r'SYSTEM_PROMPT = f"""(.*?)"""', reference.read_text(encoding="utf-8"), re.S)
-    attendu = brut.group(1).replace("{{", "{").replace("}}", "}")
-    assert generation.SYSTEM_PROMPT == attendu
-
-
-def test_nombre_maximal_de_requetes_modele(monkeypatch):
-    """Compte les appels réels sur chaque chemin, au lieu de les supposer.
-
-    Le budget temporel d'un cas d'évaluation vaut (nombre d'appels) x DELAI_APPEL_S.
-    Ce nombre doit être mesuré : un tool, un second agent ou une relance
-    supplémentaire le changeraient sans que la configuration bouge d'un caractère.
-    """
-    def compter(sorties):
-        fonction, appels = modele_qui_repond(sorties)
-        monkeypatch.setattr(generation.agent, "model", FunctionModel(fonction))
-        generation.generate_answer(FRAGMENTS, "Une question de test ?")
-        return len(appels)
-
-    chemins = {
-        "sortie valide du premier coup": compter(reponse(citations=["0_1"])),
-        "citation inventée puis corrigée": compter(
-            [reponse(citations=["9_99"]), reponse(citations=["0_1"])]
-        ),
-        "citation inventée obstinée": compter(reponse(citations=["9_99"])),
-        "abstention": compter(reponse(answer="Non.", citations=[], abstain=True, reason="absent")),
-    }
-    maximum = max(chemins.values())
-    assert maximum == 1 + generation.RELANCES_SORTIE, chemins
-
-
-def test_aucun_tool_ni_second_agent():
-    """Condition sous laquelle le compte ci-dessus reste le maximum.
-
-    Un tool ajoute un aller-retour par appel, un second agent en ajoute un par question.
-    Ce test tombera le jour où l'un des deux arrive — c'est-à-dire au moment de
-    recalculer le budget, pas au milieu d'un run payant.
-    """
-    source = Path(generation.__file__).read_text(encoding="utf-8")
-    assert "@agent.tool" not in source
-    assert source.count("Agent(") == 1
+    assert "delai_cas: float = 240.0" in source

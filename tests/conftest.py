@@ -3,6 +3,7 @@ import os
 import sys
 from pathlib import Path
 
+import pytest
 import truststore
 from dotenv import load_dotenv
 
@@ -36,3 +37,30 @@ def pytest_collection_modifyitems(config, items):
     for item in items:
         if "api" in item.keywords:
             item.add_marker(skip_api)
+
+
+@pytest.fixture(autouse=True)
+def aucun_appel_paye(request, monkeypatch):
+    """Interdit tout appel réel à Mistral dans la suite gratuite.
+
+    Posé après un incident : brancher le routeur a suffi pour que quatre tests
+    d'interface appellent l'API sans que personne ne le remarque — seul le temps
+    d'exécution avait triplé. Un test qui coûte de l'argent doit le déclarer par le
+    marqueur `api`, jamais l'obtenir par inadvertance.
+
+    Le remplacement se fait sur la classe : il couvre donc aussi les agents créés à
+    l'import, avant que le test ne s'exécute.
+    """
+    if request.node.get_closest_marker("api"):
+        return  # tests payants, explicitement marqués
+
+    from pydantic_ai.models.mistral import MistralModel
+
+    async def refuser(self, *args, **kwargs):
+        raise AssertionError(
+            "Appel réel à Mistral depuis la suite gratuite. Remplacer le modèle par un "
+            "FunctionModel, ou marquer le test @pytest.mark.api s'il doit vraiment payer."
+        )
+
+    monkeypatch.setattr(MistralModel, "request", refuser)
+    monkeypatch.setattr(MistralModel, "request_stream", refuser, raising=False)

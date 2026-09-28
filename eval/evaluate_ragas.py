@@ -45,8 +45,7 @@ logfire.configure(send_to_logfire="if-token-present")
 logfire.instrument_pydantic_ai()  # trace l'agent, ses relances et ses appels modèle
 
 # --- Système évalué ---
-from config import SEARCH_K
-from rag.generation import generate_answer
+from rag.pipeline import repondre
 from rag.vector_store import VectorStoreManager
 
 # --- Juge RAGAS : OpenAI (différent du système évalué, anti-biais) ---
@@ -57,12 +56,12 @@ from ragas.metrics.collections import AnswerCorrectness, ContextPrecision, Conte
 
 
 def query_prototype(vector_store_manager: VectorStoreManager, question: str):
-    """Reproduit le chemin de app/chat.py : recherche vectorielle puis génération."""
-    # Étape 1 : les k chunks les plus proches sémantiquement de la question
-    search_results = vector_store_manager.search(question, k=SEARCH_K)
-    # Étape 2 : contexte, prompt et appel du modèle, sous contrat (rag/generation.py)
-    reponse = generate_answer(search_results, question)
-    return search_results, reponse
+    """Le chemin complet, identique à celui de l'interface : routage, collecte, réponse.
+
+    Un seul point d'entrée partagé — sans quoi l'évaluation mesurerait autre chose que
+    ce que l'application fait.
+    """
+    return repondre(vector_store_manager, question)
 
 
 def interroger_avec_delai(vector_store_manager, question: str, delai: float):
@@ -89,7 +88,7 @@ def interroger_avec_delai(vector_store_manager, question: str, delai: float):
 
 
 def main(limit: int | None = None, label: str | None = None, force: bool = False,
-         pause: float = 5.0, delai_cas: float = 180.0):
+         pause: float = 5.0, delai_cas: float = 240.0):
     # Nom de fichier explicite (ex. "baseline") ou, à défaut, un horodatage — jamais un
     # nom fixe, pour ne jamais écraser un run précédent par erreur.
     label = label or datetime.now().strftime("run_%Y%m%d_%H%M%S")
@@ -135,9 +134,10 @@ def main(limit: int | None = None, label: str | None = None, force: bool = False
             # Un span par cas : le tableau de bord regroupe alors recherche,
             # génération et relances éventuelles sous l'identifiant du cas.
             with logfire.span("cas", id=case["id"], categorie=case["categorie"]):
-                search_results, reponse = interroger_avec_delai(
+                resultat = interroger_avec_delai(
                     vector_store_manager, case["question"], delai_cas
                 )
+                search_results, reponse = resultat.fragments, resultat.reponse
             # Le juge note ce que l'utilisateur lit, motif d'abstention compris —
             # noter `answer` seul jugerait une phrase creuse. C'est aussi ce que les
             # runs précédents notaient, ce qui préserve la comparabilité.
@@ -191,6 +191,15 @@ def main(limit: int | None = None, label: str | None = None, force: bool = False
                     "abstain": reponse.abstain,
                     "abstain_reason": reponse.abstain_reason,
                     "citations": reponse.citations,
+                    # Le routage : décision prise avant toute collecte. Le jeu de test
+                    # porte la source attendue dans `modalite`, ce qui permet de noter
+                    # cette décision sans aucun juge.
+                    "route": resultat.route.source,
+                    "route_motif": resultat.route.motif,
+                    # Les requêtes réellement exécutées, pour relire une réponse
+                    # chiffrée sans la rejouer.
+                    "sql_requetes": [r.requete for r in resultat.requetes],
+                    "sql_lignes": [r.lignes for r in resultat.requetes],
                     "faithfulness": f.value,
                     "context_precision": cp.value,
                     "context_recall": cr.value,
@@ -224,8 +233,9 @@ if __name__ == "__main__":
     # --pause : secondes entre deux cas, pour rester sous la limite de tokens/minute du juge
     parser.add_argument("--pause", type=float, default=5.0, help="Pause entre deux cas en secondes (défaut : 5)")
     # --delai-cas : abandon d'un cas dont la génération s'éternise
-    # 180 s et non 120 : le validateur de sortie peut relancer le modèle une fois, donc
-    # un cas vaut au pire 2 x 45 s de génération plus 60 s de réessai sur la recherche.
-    parser.add_argument("--delai-cas", type=float, default=180.0, help="Délai maximal de génération par cas (défaut : 180 s)")
+    # 240 s : garde-fou de dernier recours, pas remède à une latence interne. Chaque
+    # étape a son propre délai (routage 15 s, génération 45 s, SQL 5 s, recherche 60 s) ;
+    # ce budget couvre leur enchaînement le plus long, jamais atteint en régime normal.
+    parser.add_argument("--delai-cas", type=float, default=240.0, help="Délai maximal par cas (défaut : 240 s)")
     args = parser.parse_args()
     main(limit=args.limit, label=args.label, force=args.force, pause=args.pause, delai_cas=args.delai_cas)
