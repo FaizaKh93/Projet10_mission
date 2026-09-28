@@ -161,9 +161,10 @@ class RAGAnswer(BaseModel):
     )
     citations: list[str] = Field(
         default_factory=list,
-        description="Identifiants des fragments qui soutiennent la réponse, sous la forme "
-                    "1_14 — le nombre seul, sans crochets ni texte autour. "
-                    "Laisser vide en cas d'abstention.",
+        description="Identifiants de ce qui soutient la réponse : un extrait documentaire "
+                    "sous la forme 1_14, ou un résultat de requête sous la forme sql_1. "
+                    "Le nombre seul, sans crochets ni texte autour. Citer aussi les "
+                    "résultats de requête. Laisser vide en cas d'abstention.",
     )
     abstain: bool = Field(
         default=False,
@@ -307,6 +308,30 @@ class LigneStats(BaseModel):
                 f"≠ {self.games_played} matchs joués"
             )
         return self
+
+
+class SQLResult(BaseModel):
+    """Le retour d'une requête exécutée sur la base NBA.
+
+    Structuré plutôt que rendu en texte libre : l'agent reçoit une forme stable, et
+    l'évaluation peut relire après coup ce qui a réellement été exécuté. `tronque` dit
+    explicitement qu'il manque des lignes — sans quoi « les 50 premiers » se lirait
+    comme « tous ».
+    """
+
+    requete: TexteNonVide
+    colonnes: list[str] = Field(default_factory=list)
+    lignes: list[list] = Field(default_factory=list)
+    tronque: bool = False
+
+    def pour_le_modele(self) -> str:
+        """Rendu texte destiné au prompt, compact et sans ambiguïté."""
+        if not self.lignes:
+            return f"Requête exécutée :\n{self.requete}\n\nAucune ligne renvoyée."
+        entete = " | ".join(self.colonnes)
+        corps = "\n".join(" | ".join(str(v) for v in ligne) for ligne in self.lignes)
+        suite = f"\n(tronqué : seules les {len(self.lignes)} premières lignes)" if self.tronque else ""
+        return f"Requête exécutée :\n{self.requete}\n\n{entete}\n{corps}{suite}"
 
 
 class LigneRapport(BaseModel):

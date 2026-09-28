@@ -13,7 +13,7 @@ Le prompt reste celui d'origine, au caractère près. Seuls changent pour le mod
 préfixe d'identifiant sur chaque extrait, et le schéma JSON de `RAGAnswer`.
 """
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import truststore
 from pydantic_ai import Agent, ModelRetry, RunContext
@@ -22,6 +22,7 @@ from pydantic_ai.providers.mistral import MistralProvider
 from pydantic_ai.settings import ModelSettings
 
 from config import MISTRAL_API_KEY, MODEL_NAME
+from rag.sql_tool import RequeteRefusee, description_du_tool, executer_sql
 from schemas import Question, RAGAnswer, SearchResult
 
 truststore.inject_into_ssl()  # requis derrière un proxy qui inspecte le TLS
@@ -45,6 +46,12 @@ RÉPONSE DE L'ANALYSTE NBA:"""
 MESSAGE_CONTEXTE_VIDE = (
     "Aucune information pertinente trouvée dans la base de connaissances pour cette question."
 )
+# Quand la route est « base », l'absence d'extrait est normale et non un échec : le
+# message d'origine découragerait le modèle alors que l'outil SQL lui est offert.
+MESSAGE_CONTEXTE_SQL = (
+    "Aucun extrait documentaire pour cette question : la réponse doit venir de la base "
+    "de données, via l'outil à ta disposition."
+)
 TEMPERATURE = 0.1  # température basse, pour des réponses factuelles basées sur le contexte
 
 # Le problème observé est un *gel* — un appel bloqué plusieurs minutes — et non une
@@ -61,9 +68,14 @@ RELANCES_SORTIE = 1
 
 @dataclass
 class ContexteRecupere:
-    """Ce dont le validateur de sortie a besoin : les identifiants réellement servis."""
+    """Ce que les validateurs et l'outil ont besoin de savoir du run en cours."""
 
     ids_servis: set[str]
+    # Décidée au premier nœud : elle commande la mise à disposition de l'outil SQL.
+    base_autorisee: bool = False
+    # Les requêtes réellement exécutées et leurs résultats, pour la traçabilité de
+    # l'évaluation — l'agent, lui, les a déjà vues passer dans sa conversation.
+    requetes: list = field(default_factory=list)
 
 
 _modele = MistralModel(
@@ -78,6 +90,50 @@ agent = Agent(
     deps_type=ContexteRecupere,
     retries={"output": RELANCES_SORTIE},
 )
+
+
+async def _offrir_si_base_autorisee(ctx: RunContext[ContexteRecupere], definition):
+    """Retire l'outil SQL quand la route l'exclut, et le documente quand elle l'inclut.
+
+    Rendre `None` supprime l'outil de la liste transmise au modèle : il ne peut pas
+    l'appeler, plutôt qu'être prié de ne pas le faire.
+
+    Quand l'outil est offert, sa description porte le **schéma réel** et des exemples.
+    Sans cela le modèle devine les noms de colonnes — constaté sur l'API : il a écrit
+    `player_name` et `team_id` là où la base a `full_name` et `team_code`, puis épuisé
+    ses relances. Construire la description ici plutôt qu'au chargement du module lui
+    évite d'être envoyée quand l'outil n'est pas proposé.
+    """
+    if not ctx.deps.base_autorisee:
+        return None
+    definition.description = (
+        "Exécute une requête SQL en lecture seule sur la base NBA et rend le résultat. "
+        "N'invente aucun nom de table ni de colonne : utilise exactement ceux ci-dessous.\n\n"
+        + description_du_tool()
+    )
+    return definition
+
+
+# `retries=2` : une correction de requête demande parfois deux essais — le premier
+# pour découvrir le nom exact, le second pour l'employer correctement.
+@agent.tool(prepare=_offrir_si_base_autorisee, retries=2)
+def interroger_base(ctx: RunContext[ContexteRecupere], requete_sql: str) -> str:
+    """Exécute une requête SQL en lecture seule sur la base NBA et rend le résultat.
+
+    La requête doit être un SELECT portant sur les tables décrites. En cas de refus,
+    le message explique pourquoi : corrige la requête et réessaie.
+    """
+    try:
+        resultat = executer_sql(requete_sql)
+    except RequeteRefusee as e:
+        # ModelRetry plutôt qu'une exception : le modèle voit le motif et corrige.
+        raise ModelRetry(str(e)) from e
+
+    ctx.deps.requetes.append(resultat)
+    # Un identifiant par résultat, pour que la réponse puisse le citer comme un fragment
+    identifiant = f"sql_{len(ctx.deps.requetes)}"
+    ctx.deps.ids_servis.add(identifiant)
+    return f"[{identifiant}]\n{resultat.pour_le_modele()}"
 
 
 @agent.output_validator
@@ -114,8 +170,20 @@ def formater_contexte(fragments: list[SearchResult]) -> str:
     )
 
 
-def generate_answer(search_results: list[dict], question: str) -> RAGAnswer:
+def generate_answer(
+    search_results: list[dict],
+    question: str,
+    base_autorisee: bool = False,
+    contexte: ContexteRecupere | None = None,
+) -> RAGAnswer:
     """Le chemin complet : contrats d'entrée, contexte, génération sous contrat.
+
+    `base_autorisee` vient du routeur : quand elle est fausse, l'outil SQL n'est même
+    pas présenté au modèle.
+
+    `contexte` permet à l'appelant de fournir l'objet et de le relire ensuite — c'est
+    ainsi que le pipeline récupère les requêtes réellement exécutées, que l'agent, lui,
+    a déjà consommées dans sa conversation.
 
     Rend un `RAGAnswer`, pas du texte : `texte_visible()` donne la chaîne que
     l'utilisateur lit et que l'évaluation note.
@@ -124,13 +192,16 @@ def generate_answer(search_results: list[dict], question: str) -> RAGAnswer:
     question = Question(texte=question).texte
     fragments = [SearchResult(**r) for r in search_results]
 
-    prompt = SYSTEM_PROMPT.format(
-        context_str=formater_contexte(fragments), question=question
-    )
+    contexte_texte = formater_contexte(fragments)
+    if not fragments and (base_autorisee or (contexte and contexte.base_autorisee)):
+        contexte_texte = MESSAGE_CONTEXTE_SQL
+
+    prompt = SYSTEM_PROMPT.format(context_str=contexte_texte, question=question)
+    if contexte is None:
+        contexte = ContexteRecupere(ids_servis=set(), base_autorisee=base_autorisee)
+    contexte.ids_servis |= {f.id for f in fragments}
     try:
-        resultat = agent.run_sync(
-            prompt, deps=ContexteRecupere(ids_servis={f.id for f in fragments})
-        )
+        resultat = agent.run_sync(prompt, deps=contexte)
         return resultat.output
     except Exception as e:
         # L'interface et le harnais attendent une réponse, pas une exception : rendue
