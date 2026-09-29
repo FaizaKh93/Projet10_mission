@@ -1,0 +1,90 @@
+site_name: Assistant NBA — rapport de mise en place et d'évaluation
+site_description: >-
+  Audit, extension et évaluation d'un système RAG : quatre itérations mesurées,
+  de 0 à 5 réponses chiffrées exactes sur 8.
+docs_dir: docs
+site_dir: site
+
+theme:
+  name: material
+  language: fr
+  palette:
+    # Le thème suit la préférence du système, avec une bascule manuelle : un rapport
+    # se lit aussi bien sur un vidéoprojecteur en salle éclairée que le soir.
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: blue grey
+      accent: teal
+      toggle:
+        icon: material/weather-night
+        name: Passer au thème sombre
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: blue grey
+      accent: teal
+      toggle:
+        icon: material/weather-sunny
+        name: Passer au thème clair
+  features:
+    - navigation.sections      # les sections restent dépliées : le plan est visible
+    - navigation.indexes       # un titre de section est cliquable et porte sa propre page
+    - navigation.top
+    - navigation.footer        # « précédent / suivant » : le rapport se lit d'un bout à l'autre
+    - toc.follow
+    - content.code.copy
+    - search.highlight
+
+markdown_extensions:
+  - admonition                 # les encadrés « attention », « note »
+  - attr_list
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences:
+      custom_fences:
+        # Rend les blocs ```mermaid comme des diagrammes, et non comme du code.
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+
+# Le notebook vit dans eval/, à côté des résultats qu'il lit. Ce crochet le copie dans
+# docs/ à chaque construction plutôt que d'en maintenir un double.
+hooks:
+  - scripts/mkdocs_hooks.py
+
+plugins:
+  - search:
+      lang: fr
+  # Le notebook est publié AVEC ses sorties, sans être réexécuté : ses chiffres sont
+  # ceux des runs réels, et le site ne doit pas dépendre d'une clé API pour se
+  # construire.
+  - mkdocs-jupyter:
+      execute: false
+      include_source: true
+
+nav:
+  - Accueil: index.md
+  - 1. Contexte et objectifs: contexte.md
+  - 2. Méthodologie d'évaluation: methodologie.md
+  - 3. Le système:
+      # Première entrée sans titre : c'est la page de la section elle-même, rendue
+      # cliquable par la fonctionnalité navigation.indexes.
+      - systeme/index.md
+      - 3.1 Vue d'ensemble: systeme/vue-ensemble.md
+      - 3.2 Les discussions Reddit: systeme/reddit.md
+      - 3.3 Le classeur de statistiques: systeme/classeur.md
+      - 3.4 Le choix de la source: systeme/routage.md
+  - 4. Les quatre itérations: iterations.md
+  - 5. Comparatif: comparatif.md
+  - 6. Analyse critique: analyse-critique.md
+  - 7. Conclusion et perspectives: conclusion.md
+  - Annexes:
+      - L'API REST: annexes/api.md
+      - Traçabilité: annexes/tracabilite.md
+      - Tests et couverture: annexes/tests.md
+      - Notebook d'analyse: notebook.ipynb

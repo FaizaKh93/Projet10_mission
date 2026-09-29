@@ -31,6 +31,12 @@ dependencies = [
 ]
 
 [dependency-groups]
+# Le rapport MkDocs : hors des dépendances de production, qui n'ont pas à embarquer un
+# générateur de site. `uv sync --group docs` pour l'installer.
+docs = [
+    "mkdocs-material>=9.5",
+    "mkdocs-jupyter>=0.25",
+]
 dev = [
     "ipykernel>=7.3.0",
     "jupyter>=1.1.1",
