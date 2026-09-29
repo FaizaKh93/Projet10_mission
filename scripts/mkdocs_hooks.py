@@ -10,6 +10,7 @@ l'original reste la seule version qu'on modifie.
 """
 import logging
 import shutil
+import sys
 from pathlib import Path
 
 RACINE = Path(__file__).resolve().parent.parent
@@ -20,7 +21,12 @@ log = logging.getLogger("mkdocs.hooks")
 
 
 def on_pre_build(config, **kwargs) -> None:
-    """Copie le notebook avant que MkDocs ne parcoure `docs/`."""
+    """Prépare ce que `docs/` ne contient pas en propre, avant que MkDocs ne le parcoure."""
+    _copier_notebook()
+    _generer_figures()
+
+
+def _copier_notebook() -> None:
     if not ORIGINAL.exists():
         log.warning(
             f"{ORIGINAL.relative_to(RACINE)} introuvable : la page du notebook sera "
@@ -31,3 +37,21 @@ def on_pre_build(config, **kwargs) -> None:
     COPIE.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(ORIGINAL, COPIE)  # copy2 préserve la date, donc la reconstruction incrémentale
     log.info(f"Notebook copié depuis {ORIGINAL.relative_to(RACINE)}")
+
+
+def _generer_figures() -> None:
+    """Les figures du comparatif sont produites depuis `eval/results/`.
+
+    Import local et échec toléré : la construction du site ne doit pas dépendre de la
+    présence de matplotlib, qui n'est utile qu'à cette étape.
+    """
+    # MkDocs charge ce fichier par son chemin : son dossier n'est pas sur sys.path.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    try:
+        import figures_rapport
+    except ImportError as e:
+        log.warning(f"Figures du comparatif non générées ({e}). Installer le groupe `docs`.")
+        return
+
+    figures_rapport.main()
+    log.info("Figures du comparatif générées depuis eval/results/")

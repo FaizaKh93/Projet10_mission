@@ -41,4 +41,5 @@ htmlcov/
 # et le cache du plugin mkdocs-jupyter
 site/
 docs/notebook.ipynb
+docs/assets/
 .cache/

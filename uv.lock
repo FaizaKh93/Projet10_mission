@@ -4277,6 +4277,7 @@ dev = [
     { name = "statsmodels" },
 ]
 docs = [
+    { name = "matplotlib" },
     { name = "mkdocs-jupyter" },
     { name = "mkdocs-material" },
 ]
@@ -4318,6 +4319,7 @@ dev = [
     { name = "statsmodels", specifier = ">=0.15.0" },
 ]
 docs = [
+    { name = "matplotlib", specifier = ">=3.8" },
     { name = "mkdocs-jupyter", specifier = ">=0.25" },
     { name = "mkdocs-material", specifier = ">=9.5" },
 ]

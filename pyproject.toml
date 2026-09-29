@@ -36,6 +36,7 @@ dependencies = [
 docs = [
     "mkdocs-material>=9.5",
     "mkdocs-jupyter>=0.25",
+    "matplotlib>=3.8",  # les figures du comparatif, générées depuis eval/results/
 ]
 dev = [
     "ipykernel>=7.3.0",

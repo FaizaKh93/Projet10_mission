@@ -11,11 +11,15 @@ Quatre runs, 18 cas chacun, **aucun échec système**.
 | `pydantic_contracts` | **0.784** | 0.165 | 0.324 | 0.268 |
 | `sql_routing` | 0.713 | 0.554 | 0.602 | **0.396** |
 
+![Les quatre métriques sur les quatre runs](assets/metriques-light.png#only-light)
+![Les quatre métriques sur les quatre runs](assets/metriques-dark.png#only-dark)
+
 !!! danger "Deux colonnes ne se lisent pas de bout en bout"
-    `context_precision` et `context_recall` **ne sont pas comparables** entre le
-    troisième et le quatrième run : l'unité récupérée a changé. Voir
-    [§ 6.1](analyse-critique.md). La seule métrique RAGAS comparable sur les quatre runs
-    est `answer_correctness`.
+    Sur la figure, `context_precision` et `context_recall` bondissent au quatrième run.
+    **Ce n'est pas une amélioration de la recherche** : l'unité récupérée a changé entre
+    le troisième et le quatrième run, et ces deux métriques ne sont donc pas comparables
+    — voir [§ 6.1](analyse-critique.md). La seule métrique RAGAS comparable sur les
+    quatre runs est `answer_correctness`.
 
 ## 5.2 Les contrôles sans juge
 
@@ -53,17 +57,16 @@ restent à 0 sur 8 — le système a maintenant *raison* de se taire.
 Les moyennes globales masquent des mouvements opposés. Le découpage par source les
 révèle.
 
-### `answer_correctness`, questions Excel
+![answer_correctness par modalité sur les quatre runs](assets/modalites-light.png#only-light)
+![answer_correctness par modalité sur les quatre runs](assets/modalites-dark.png#only-dark)
 
-| Run | Score |
-|---|---|
-| `baseline` | 0.160 |
-| `reddit_only` | 0.092 |
-| `pydantic_contracts` | 0.262 |
-| `sql_routing` | **0.598** |
+Une seule courbe décolle. Depuis le prototype livré, les questions **Excel** passent de
+0.160 à **0.598** — soit **+0.438**, contre +0.141 sur les questions Reddit et **+0.023**
+sur les hybrides. Le gain du projet y est concentré, et l'immobilité de la courbe
+hybride dit exactement où il reste du travail.
 
-C'est là que se concentre le gain du projet : **+0.336 sur les six questions Excel**,
-contre +0.011 sur les questions Reddit.
+Le creux d'Excel au second run n'est pas un accident : c'est le moment où le classeur
+sort de l'index sans que rien ne l'ait encore remplacé.
 
 Sur les questions Reddit, où le mécanisme de récupération n'a pas changé, les métriques
 de contexte sont **identiques au centième** d'un run à l'autre. Tout écart global vient
