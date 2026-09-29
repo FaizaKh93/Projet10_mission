@@ -27,10 +27,18 @@ def vector_store():
 
 
 def test_query_prototype(vector_store):
-    """query_prototype() rend les fragments bruts et une réponse structurée."""
-    search_results, reponse = query_prototype(
+    """query_prototype() rend le `Reponse` complet que la boucle d'évaluation découpe.
+
+    Ce test était resté écrit pour l'ancien retour en tuple de deux éléments, alors que
+    `repondre()` rend un objet à quatre champs. Il n'échouait nulle part : porté par
+    `pytest -m api`, il n'aurait cassé qu'au lancement d'une campagne facturée.
+    """
+    resultat = query_prototype(
         vector_store, "Combien de points Nikola Jokić a-t-il marqués ?"
     )
+    # Exactement ce que fait la boucle : elle lit des ATTRIBUTS, pas un tuple.
+    search_results, reponse = resultat.fragments, resultat.reponse
+
     # Les fragments arrivent en dicts : c'est ce format que la boucle découpe ensuite en
     # `retrieved_contexts` (texte) et `retrieved_sources` (métadonnées). `id` est
     # indispensable aux citations.
@@ -42,6 +50,16 @@ def test_query_prototype(vector_store):
     assert isinstance(reponse, RAGAnswer)
     # La chaîne notée par le juge ne doit jamais être vide
     assert reponse.texte_visible().strip()
-    # Toute citation rendue a survécu au validateur, donc existe dans le contexte servi
+    # Toute citation rendue a survécu au validateur : elle existe dans le contexte servi,
+    # extrait documentaire comme résultat de requête.
     ids_servis = {r["id"] for r in search_results}
+    ids_servis |= {f"sql_{i}" for i in range(1, len(resultat.requetes) + 1)}
     assert set(reponse.citations) <= ids_servis
+
+    # Le routage est enregistré par la boucle pour être noté SANS juge : sans motif ni
+    # source, la moitié de l'analyse de l'étape 3 n'a plus de matière.
+    assert resultat.route.source in ("documents", "base", "les_deux", "aucune")
+    assert resultat.route.motif
+
+    # Question purement chiffrée : la base doit avoir été interrogée.
+    assert resultat.requetes, "aucune requête SQL sur une question purement chiffrée"

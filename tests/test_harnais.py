@@ -5,6 +5,7 @@ Gratuits : le système interrogé est remplacé par une fonction. On mesure des
 comportements — temps mural, nombre d'appels — et non des constantes de configuration.
 Un test qui compare deux valeurs de `pyproject.toml` ne prouve rien sur l'exécution.
 """
+import json
 import sys
 import time
 from pathlib import Path
@@ -64,3 +65,30 @@ def test_le_delai_par_cas_couvre_le_pire_cas_mesure():
 
     defaut = inspect.signature(ev.main).parameters["delai_cas"].default
     assert defaut >= pire_generation + pire_recherche
+
+
+def test_ce_que_le_harnais_ecrit_est_serialisable_en_json():
+    """Le harnais réécrit le fichier de résultats APRÈS CHAQUE cas.
+
+    Une valeur non sérialisable ferait échouer l'écriture une fois le cas déjà payé, et
+    arrêterait la campagne à cet endroit. SQLite peut rendre des `bytes`, que
+    `json.dumps` refuse — le risque n'est pas théorique.
+
+    On sérialise donc de vraies lignes, issues de la vraie base, dans la forme exacte
+    que la boucle enregistre.
+    """
+    from rag.sql_tool import executer_sql
+
+    resultat = executer_sql(
+        "SELECT p.full_name, s.pts_total, s.fg_pct, s.minutes_per_game "
+        "FROM stats s JOIN players p ON p.player_id = s.player_id LIMIT 5"
+    )
+
+    enregistrement = {
+        "sql_requetes": [resultat.requete],
+        "sql_lignes": [resultat.lignes],
+    }
+    texte = json.dumps(enregistrement, ensure_ascii=False, indent=2)
+
+    # Aller-retour complet : ce que le notebook relira ensuite
+    assert json.loads(texte)["sql_lignes"][0] == resultat.lignes

@@ -64,6 +64,135 @@ def query_prototype(vector_store_manager: VectorStoreManager, question: str):
     return repondre(vector_store_manager, question)
 
 
+# Ce que le modèle a vu quand il n'a reçu aucun extrait. Repris à l'identique de
+# generation.py : le juge doit noter le contexte RÉEL, pas une reconstitution.
+from rag.generation import MESSAGE_CONTEXTE_SQL, MESSAGE_CONTEXTE_VIDE
+
+
+def creer_juge():
+    """Instancie le juge une fois : quatre métriques partageant le même LLM.
+
+    Extrait pour que la campagne et la renotation emploient **le même juge**. Deux
+    constructions séparées finiraient par diverger, et des scores produits par deux
+    juges différents ne se comparent pas.
+    """
+    print("Initialisation du juge RAGAS (OpenAI gpt-4o)...")
+    openai_client = AsyncOpenAI()  # client asynchrone requis par ragas (score() lance ascore() en interne)
+    # max_tokens relevé (défaut trop bas) : sur les contextes longs, le juge doit lister
+    # beaucoup d'énoncés/verdicts en sortie structurée, et se faisait tronquer sans cette valeur.
+    judge_llm = llm_factory("gpt-4o", client=openai_client, max_tokens=8192)
+    judge_embeddings = OpenAIEmbeddings(client=openai_client)  # requis par Answer Correctness
+
+    return {
+        # La réponse invente-t-elle des faits absents du contexte récupéré ?
+        "faithfulness": Faithfulness(llm=judge_llm),
+        # Les contextes récupérés sont-ils pertinents ? Ne regarde pas la réponse.
+        "context_precision": ContextPrecision(llm=judge_llm),
+        # Le contexte contient-il de quoi répondre ? Exhaustivité vs pertinence.
+        "context_recall": ContextRecall(llm=judge_llm),
+        # La réponse correspond-elle à la référence ? Similarité + recoupement factuel :
+        # sanctionne un chiffre faux même si la réponse reste sur le sujet.
+        "answer_correctness": AnswerCorrectness(llm=judge_llm, embeddings=judge_embeddings),
+    }
+
+
+def noter(metriques: dict, question: str, reference: str, reponse: str, contextes: list) -> dict:
+    """Les quatre scores d'un cas. Lève si le juge est indisponible."""
+    m = metriques
+    return {
+        "faithfulness": m["faithfulness"].score(
+            user_input=question, response=reponse, retrieved_contexts=contextes
+        ).value,
+        "context_precision": m["context_precision"].score(
+            user_input=question, reference=reference, retrieved_contexts=contextes
+        ).value,
+        "context_recall": m["context_recall"].score(
+            user_input=question, retrieved_contexts=contextes, reference=reference
+        ).value,
+        "answer_correctness": m["answer_correctness"].score(
+            user_input=question, response=reponse, reference=reference
+        ).value,
+    }
+
+
+def renoter(label: str, pause: float = 5.0):
+    """Note les cas laissés sans score, à partir du fichier de résultats.
+
+    Ne relance NI le routage, NI la génération, NI la moindre requête : la réponse et
+    les contextes sont déjà sur disque, payés en appels Mistral. Seul le juge est
+    rappelé. C'est ce que la séparation système / notation rend possible — une panne
+    du juge, un quota épuisé, et l'on reprend là où l'on s'est arrêté.
+    """
+    chemin = Path(__file__).resolve().parent / "results" / f"{label}.json"
+    resultats = json.loads(chemin.read_text(encoding="utf-8"))
+
+    a_noter = [c for c in resultats if "error_notation" in c]
+    perdus = [c["id"] for c in resultats if c.get("etape") == "systeme"]
+    print(f"{len(resultats)} cas dans {chemin.name} : {len(a_noter)} à noter.")
+    if perdus:
+        print(f"  {len(perdus)} cas sans sortie système, irrécupérables ici : {perdus}")
+    if not a_noter:
+        print("Rien à faire.")
+        return
+
+    metriques = creer_juge()
+    for i, cas in enumerate(a_noter, 1):
+        print(f"[{i}/{len(a_noter)}] {cas['id']} - {cas['question'][:70]}...")
+        try:
+            cas.update(
+                noter(
+                    metriques,
+                    cas["question"],
+                    cas["reference_answer"],
+                    cas["system_response"],
+                    cas["retrieved_contexts"],
+                )
+            )
+            cas.pop("error_notation", None)
+        except Exception as e:
+            print(f"  ECHEC NOTATION sur {cas['id']} : {e}")
+            cas["error_notation"] = str(e)
+
+        # Après chaque cas : une seconde panne ne reperd pas ce qui vient d'être noté.
+        chemin.write_text(json.dumps(resultats, ensure_ascii=False, indent=2), encoding="utf-8")
+        if pause and i < len(a_noter):
+            time.sleep(pause)
+
+    restants = [c["id"] for c in resultats if "error_notation" in c]
+    print(f"\nTerminé. {len(restants)} cas encore sans score : {restants or 'aucun'}")
+
+
+def construire_contextes(fragments: list, requetes: list, base_autorisee: bool):
+    """Le contexte transmis au juge : ce que le modèle a réellement eu sous les yeux.
+
+    Sur la route `base`, aucun extrait n'est récupéré — c'est voulu, cela évite un
+    embedding facturé pour un contexte inutile. Le contexte du modèle est alors le
+    RÉSULTAT DE LA REQUÊTE. Ne transmettre que les fragments laissait la liste vide,
+    et RAGAS refuse un échantillon sans contexte : 9 cas sur 18 perdus.
+
+    Attention à la lecture des scores qui en découlent : `context_precision` et
+    `context_recall` portaient sur 5 extraits flous, ils porteront ici sur une ligne
+    exacte. Ces deux métriques ne se comparent donc PAS d'un run à l'autre sur la
+    moyenne globale — seulement par modalité, là où le mécanisme n'a pas changé.
+
+    Rend (contextes, sources), alignés.
+    """
+    contextes = [f["text"] for f in fragments]
+    sources = [f["metadata"].get("source", "Inconnue") for f in fragments]
+
+    for i, resultat in enumerate(requetes, 1):
+        contextes.append(resultat.pour_le_modele())
+        sources.append(f"base NBA (sql_{i})")
+
+    if not contextes:
+        # Ni extrait ni requête : le modèle a quand même reçu une phrase, celle qui
+        # figure dans son prompt. C'est elle que le juge doit noter.
+        contextes = [MESSAGE_CONTEXTE_SQL if base_autorisee else MESSAGE_CONTEXTE_VIDE]
+        sources = ["aucune source"]
+
+    return contextes, sources
+
+
 def interroger_avec_delai(vector_store_manager, question: str, delai: float):
     """Interroge le système en abandonnant au-delà de `delai` secondes.
 
@@ -111,25 +240,15 @@ def main(limit: int | None = None, label: str | None = None, force: bool = False
     print("Chargement du VectorStoreManager (système évalué)...")
     vector_store_manager = VectorStoreManager()  # index FAISS + chunks depuis data/vector_db/
 
-    print("Initialisation du juge RAGAS (OpenAI gpt-4o)...")
-    openai_client = AsyncOpenAI()  # client asynchrone requis par ragas (score() lance ascore() en interne)
-    # max_tokens relevé (défaut trop bas) : sur les contextes longs, le juge doit lister
-    # beaucoup d'énoncés/verdicts en sortie structurée, et se faisait tronquer sans cette valeur.
-    judge_llm = llm_factory("gpt-4o", client=openai_client, max_tokens=8192)
-    judge_embeddings = OpenAIEmbeddings(client=openai_client)  # requis par Answer Correctness
-
-    # Chaque métrique est instanciée une seule fois, puis réutilisée pour tous les cas
-    faithfulness = Faithfulness(llm=judge_llm)
-    context_precision = ContextPrecision(llm=judge_llm)
-    context_recall = ContextRecall(llm=judge_llm)
-    answer_correctness = AnswerCorrectness(llm=judge_llm, embeddings=judge_embeddings)
+    metriques = creer_juge()
 
     results = []
     for i, case in enumerate(testset, 1):
         print(f"[{i}/{len(testset)}] {case['id']} - {case['question'][:70]}...")
 
-        # Chaque cas est isolé : un échec (ex. limite de tokens côté juge) ne doit pas
-        # faire perdre les résultats déjà obtenus - et déjà payés - sur les cas précédents.
+        # ÉTAPE 1 — le système. Ce qu'elle produit est payé en appels Mistral : on
+        # l'enregistre AVANT toute notation, pour qu'un incident du juge ne le
+        # détruise pas. Un run où le juge échoue reste alors renotable sans repayer.
         try:
             # Un span par cas : le tableau de bord regroupe alors recherche,
             # génération et relances éventuelles sous l'identifiant du cas.
@@ -138,77 +257,55 @@ def main(limit: int | None = None, label: str | None = None, force: bool = False
                     vector_store_manager, case["question"], delai_cas
                 )
                 search_results, reponse = resultat.fragments, resultat.reponse
-            # Le juge note ce que l'utilisateur lit, motif d'abstention compris —
-            # noter `answer` seul jugerait une phrase creuse. C'est aussi ce que les
-            # runs précédents notaient, ce qui préserve la comparabilité.
-            answer = reponse.texte_visible()
-            # RAGAS attend le texte seul des chunks ; les sources sont gardées à part
-            # pour l'analyse, sans avoir à relancer la recherche.
-            contexts = [res["text"] for res in search_results]
-            sources = [res["metadata"].get("source", "Inconnue") for res in search_results]
+        except Exception as e:
+            print(f"  ECHEC SYSTEME sur {case['id']} : {e}")
+            results.append({"id": case["id"], "error": str(e), "etape": "systeme"})
+            out_path.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
+            continue
 
-            # Métrique 1 - Faithfulness : la réponse invente-t-elle des faits absents du
-            # contexte récupéré (hallucination) ?
-            f = faithfulness.score(
-                user_input=case["question"], response=answer, retrieved_contexts=contexts
-            )
+        # Le juge note ce que l'utilisateur lit, motif d'abstention compris — noter
+        # `answer` seul jugerait une phrase creuse. C'est aussi ce que les runs
+        # précédents notaient, ce qui préserve la comparabilité.
+        answer = reponse.texte_visible()
+        contexts, sources = construire_contextes(
+            search_results, resultat.requetes, resultat.route.source in ("base", "les_deux")
+        )
 
-            # Métrique 2 - Context Precision : les chunks récupérés sont-ils pertinents au
-            # regard de ce qu'il fallait retrouver ? Ne regarde pas la réponse générée.
-            cp = context_precision.score(
-                user_input=case["question"], reference=case["reference_answer"], retrieved_contexts=contexts
-            )
+        # Tout ce que le système a produit, indépendamment du juge.
+        enregistrement = {
+            "id": case["id"],
+            "categorie": case["categorie"],
+            "modalite": case["modalite"],
+            "sous_type": case.get("sous_type"),
+            "expected_behavior": case["expected_behavior"],
+            "evaluation_focus": case["evaluation_focus"],
+            "question": case["question"],
+            "reference_answer": case["reference_answer"],
+            "system_response": answer,
+            "retrieved_contexts": contexts,
+            "retrieved_sources": sources,
+            "answer_raw": reponse.answer,
+            "abstain": reponse.abstain,
+            "abstain_reason": reponse.abstain_reason,
+            "citations": reponse.citations,
+            "route": resultat.route.source,
+            "route_motif": resultat.route.motif,
+            "sql_requetes": [r.requete for r in resultat.requetes],
+            "sql_lignes": [r.lignes for r in resultat.requetes],
+        }
 
-            # Métrique 3 - Context Recall : le contexte contient-il tout ce qu'il faut pour
-            # répondre ? Complémentaire de la précision (exhaustivité vs pertinence).
-            cr = context_recall.score(
-                user_input=case["question"], retrieved_contexts=contexts, reference=case["reference_answer"]
-            )
-
-            # Métrique 4 - Answer Correctness : la réponse correspond-elle à la référence ?
-            # Similarité sémantique + recoupement factuel : sanctionne un chiffre faux même
-            # si la réponse reste sur le sujet.
-            ac = answer_correctness.score(
-                user_input=case["question"], response=answer, reference=case["reference_answer"]
-            )
-
-            results.append(
-                {
-                    "id": case["id"],
-                    "categorie": case["categorie"],
-                    "modalite": case["modalite"],
-                    "sous_type": case.get("sous_type"),
-                    "expected_behavior": case["expected_behavior"],
-                    "evaluation_focus": case["evaluation_focus"],
-                    "question": case["question"],
-                    "reference_answer": case["reference_answer"],
-                    "system_response": answer,
-                    "retrieved_contexts": contexts,
-                    "retrieved_sources": sources,
-                    # Sortie structurée, gardée à part pour l'analyse
-                    # comportementale du notebook, qui ne passe par aucun juge.
-                    "answer_raw": reponse.answer,
-                    "abstain": reponse.abstain,
-                    "abstain_reason": reponse.abstain_reason,
-                    "citations": reponse.citations,
-                    # Le routage : décision prise avant toute collecte. Le jeu de test
-                    # porte la source attendue dans `modalite`, ce qui permet de noter
-                    # cette décision sans aucun juge.
-                    "route": resultat.route.source,
-                    "route_motif": resultat.route.motif,
-                    # Les requêtes réellement exécutées, pour relire une réponse
-                    # chiffrée sans la rejouer.
-                    "sql_requetes": [r.requete for r in resultat.requetes],
-                    "sql_lignes": [r.lignes for r in resultat.requetes],
-                    "faithfulness": f.value,
-                    "context_precision": cp.value,
-                    "context_recall": cr.value,
-                    "answer_correctness": ac.value,
-                }
+        # ÉTAPE 2 — la notation. Un échec ici ne coûte que les scores.
+        try:
+            enregistrement.update(
+                noter(metriques, case["question"], case["reference_answer"], answer, contexts)
             )
         except Exception as e:
-            print(f"  ECHEC sur {case['id']} : {e}")
-            results.append({"id": case["id"], "error": str(e)})
+            # La sortie du système est conservée : seuls les scores manquent, et ils
+            # se rattrapent depuis ce fichier sans relancer un seul appel Mistral.
+            print(f"  ECHEC NOTATION sur {case['id']} : {e}")
+            enregistrement["error_notation"] = str(e)
+
+        results.append(enregistrement)
 
         # Sauvegarde après CHAQUE cas : si le script s'arrête au cas 15, les 14 premiers
         # restent sur disque au lieu d'être perdus.
@@ -237,5 +334,13 @@ if __name__ == "__main__":
     # étape a son propre délai (routage 15 s, génération 45 s, SQL 5 s, recherche 60 s) ;
     # ce budget couvre leur enchaînement le plus long, jamais atteint en régime normal.
     parser.add_argument("--delai-cas", type=float, default=240.0, help="Délai maximal par cas (défaut : 240 s)")
+    # --renoter : note les cas restés sans score, sans relancer le système
+    parser.add_argument("--renoter", action="store_true", help="Noter les cas sans score d'un run existant (aucun appel Mistral)")
     args = parser.parse_args()
-    main(limit=args.limit, label=args.label, force=args.force, pause=args.pause, delai_cas=args.delai_cas)
+
+    if args.renoter:
+        if not args.label:
+            parser.error("--renoter exige --label")
+        renoter(label=args.label, pause=args.pause)
+    else:
+        main(limit=args.limit, label=args.label, force=args.force, pause=args.pause, delai_cas=args.delai_cas)

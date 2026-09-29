@@ -4,9 +4,8 @@ Un prototype d'assistant répond à des questions de fans de NBA à partir de de
 sources : quatre fils Reddit et un classeur de statistiques de saison régulière. Ce
 dépôt en mesure la fiabilité, puis corrige les défauts que la mesure établit.
 
-Trois évaluations ont établi où le prototype échoue. Les contrats, la base
-relationnelle et le routage répondent à ces échecs ; l'évaluation qui les mesure reste
-à conduire.
+Quatre évaluations jalonnent le travail. La dernière mesure l'effet de la base
+relationnelle et du routage : **5 chiffres exacts sur 8, contre 0 sur 8 au départ**.
 
 ---
 
@@ -247,6 +246,20 @@ modèle ne se note lui-même :
 existant. Les résultats sont écrits **après chaque cas** : une interruption ne perd pas
 ce qui précède. Les deux API sont facturées.
 
+**Exécution et notation sont enregistrées séparément.** Le système répond (Mistral),
+puis le juge note (OpenAI). Une panne du juge — quota épuisé, limite de débit — n'efface plus
+la réponse déjà payée : elle est conservée avec un champ `error_notation`, et se rattrape
+sans relancer le système :
+
+```bash
+uv run python eval/evaluate_ragas.py --label sql_routing --renoter
+```
+
+**Aucun appel Mistral** : ni routage, ni recherche, ni requête SQL. Les cas déjà notés
+sont ignorés, donc la commande se relance autant de fois que nécessaire — elle avance à
+chaque passage. C'est ce qui a sauvé le 4ᵉ run, interrompu par un quota OpenAI épuisé
+après 18 réponses déjà produites.
+
 ### Lire les résultats
 
 `eval/analyze_results.ipynb` est versionné avec ses sorties : il se lit sans être
@@ -256,41 +269,72 @@ exécuté.
 
 ## Ce que l'évaluation établit
 
-Trois runs, 18 cas chacun, aucun échec technique :
+Quatre runs, 18 cas chacun, aucun échec système :
 
 | Run | `faithfulness` | `context_precision` | `context_recall` | `answer_correctness` |
 |---|---|---|---|---|
 | `baseline` | 0.408 | 0.165 | 0.435 | 0.196 |
 | `reddit_only` | 0.231 | 0.193 | 0.352 | 0.186 |
-| `pydantic_contracts` | **0.784** | 0.165 | 0.324 | **0.268** |
+| `pydantic_contracts` | **0.784** | 0.165 | 0.324 | 0.268 |
+| `sql_routing` | 0.713 | 0.554 | 0.602 | **0.396** |
 
 Contrôles qui ne dépendent d'aucun jugement de modèle :
 
-| | `baseline` | `reddit_only` | `pydantic_contracts` |
-|---|---|---|---|
-| Chiffres corrects (/8) | 0 | 0 | 0 |
-| Refus sur les questions sans réponse (/6) | 1 | 0 | **3** |
-| Citations invalides | — | — | **0** |
+| | `baseline` | `reddit_only` | `pydantic_contracts` | `sql_routing` |
+|---|---|---|---|---|
+| Chiffres corrects (/8) | 0 | 0 | 0 | **5** |
+| Routage correct (/18) | — | — | — | **15** |
+| Refus sur les questions sans réponse (/6) | 1 | 0 | **3** | 2 |
+| Citations invalides | — | — | 0 | 0 |
 
-**Ce qui est acquis.** Les contrats et la sortie structurée font passer `faithfulness`
-de 0.408 à 0.784, et de 0.036 à 0.705 sur les questions bruitées — là où le prototype
-inventait le plus. L'abstention devient un champ exploitable au lieu d'une tournure de
-phrase à deviner.
+**Les chiffres, enfin.** **5 sur 8, contre 0 sur 8 aux trois runs précédents** — et
+**4/4** sur les questions qui tiennent en une requête directe. `answer_correctness`
+passe de 0.268 à **0.396**, et de 0.262 à **0.598** sur les questions Excel. C'était le
+manque central du prototype.
 
-**Ce qui ne l'est pas.** Aucune des huit questions chiffrées n'obtient le bon nombre,
-sur aucun des trois runs : au moment de ces mesures, la donnée avait quitté l'index et
-rien ne l'avait remplacée. Le système a désormais raison de s'abstenir, ce que le jeu de
-test compte comme six faux refus — ils ne deviendront des échecs que si le refus
-persiste une fois l'accès aux chiffres rétabli.
+**L'ancrage, acquis plus tôt.** Les contrats et la sortie structurée avaient fait passer
+`faithfulness` de 0.408 à 0.784, et de 0.036 à 0.705 sur les questions bruitées. Le
+quatrième run le fait reculer à 0.713 — au-dessus du plancher de bruit, donc réel.
 
-**Ce qui n'est pas encore mesuré.** La base et le routage sont postérieurs à ces trois
-runs : le tableau ci-dessus ne les juge pas. Un appel réel montre la chaîne produire la
-bonne requête et le bon chiffre, mais un cas n'est pas une mesure — c'est le prochain
-run qui tranchera.
+**Une absence devient démontrable.** Interrogé sur Reggie Miller, absent des données, le
+système fabriquait des chiffres — au troisième run **en citant deux fragments
+parfaitement réels**. Au quatrième, la requête rend **zéro ligne** et il s'abstient avec
+un motif exact. Une requête vide est une **preuve d'absence** ; aucun corpus
+documentaire ne peut en fournir, car un corpus muet est indiscernable d'une recherche
+ratée.
 
-**Une limite à connaître.** Sur Reggie Miller, absent des données, le système fabrique
-des chiffres **en citant deux fragments parfaitement réels**. Une citation prouve la
-provenance de l'identifiant, pas celle du fait.
+**Le chemin hybride reste faible : 1/4.** Identifier quelqu'un dans les discussions
+*puis* chercher son chiffre est l'enchaînement qui casse. Les trois erreurs de routage
+sont toutes des hybrides, et recoupent exactement les trois chiffres manqués.
+
+**Et les refus reculent, 3/6 à 2/6.** Là où le système se taisait faute d'accès, il
+interroge et répond à côté. Deux cas sont instructifs, et **aucun n'invente hors des
+sources** :
+
+- **B4** — on demande une comparaison domicile/extérieur, dimension inexistante. Le
+  modèle écrit `CASE WHEN team_code IN (...) THEN 'Domicile'` et **fabrique la
+  dimension** en SQL.
+- **B6** — `SELECT MAX(s.wins_total) AS total_points` : il interroge les victoires et
+  annonce « 49 points marqués en playoffs ».
+
+Ces deux limites sont **identifiées et non résolues**. La description transmise à
+l'outil énonce pourtant deux fois qu'il n'y a pas de distinction domicile/extérieur : le
+défaut n'est donc pas un manque d'information, c'est qu'**une information ne contraint
+pas**. Ajouter une consigne de plus serait un correctif non mesuré.
+
+**Le biais du mapping NL→SQL.** Les trois erreurs de routage sont des questions
+formulées en **« combien de… »**, où l'étape d'identification dans les documents est
+implicite. Le routeur s'arrête à la forme de surface — ses propres motifs le disent :
+*« demande un chiffre précis qui ne peut être obtenu que via la base »*. Il décide sur
+les **limites** de la base, jamais sur ses colonnes : bon niveau d'abstraction, mais
+angle mort assumé.
+
+**Deux métriques qui ne se comparent pas.** `context_precision` et `context_recall`
+bondissent au quatrième run (0.165 → 0.554), mais **par changement d'unité** : cinq
+extraits flous d'un côté, une ligne de base exacte de l'autre. Le contrôle est net — sur
+les questions Reddit, où le mécanisme n'a pas bougé, elles valent **0.495 et 0.639 dans
+les deux runs, au centième près**. Tout le gain vient des questions Excel. Ce n'est pas
+une meilleure recherche.
 
 **Un plancher de bruit, mesuré.** Les runs `reddit_only` et `pydantic_contracts`
 partagent exactement les mêmes contextes (18 cas sur 18), et pourtant leurs métriques
