@@ -198,7 +198,8 @@ et prend plusieurs minutes.
 uv run python scripts/index.py                # construit data/vector_db/ — appels API facturés
 uv run python scripts/load_excel_to_db.py     # tables teams / players / stats
 uv run python scripts/load_reports_to_db.py   # table reports — reprend le texte de l'index
-uv run streamlit run app/chat.py              # lance l'assistant
+uv run streamlit run app/chat.py              # l'assistant, en interface web
+uv run uvicorn app.api:app --reload           # le même assistant, en HTTP
 ```
 
 `data/vector_db/` et `data/nba.db` ne sont pas versionnés : ils se régénèrent.
@@ -206,6 +207,118 @@ uv run streamlit run app/chat.py              # lance l'assistant
 `load_reports_to_db.py` lit le texte déjà extrait par l'indexation plutôt que de
 relancer l'OCR : quelques secondes au lieu d'une dizaine de minutes. L'OCR reste en
 recours pour un PDF absent de l'index.
+
+---
+
+## L'API REST
+
+Même pipeline que l'interface Streamlit, autre transport : les deux appellent
+`repondre()`. Une réponse servie en HTTP est donc celle que l'évaluation mesure.
+
+```bash
+uv run uvicorn app.api:app --reload
+```
+
+| Endpoint | Rôle |
+|---|---|
+| `GET /` | identité du service et liste des endpoints |
+| `GET /health` | *liveness* — le processus répond, aucune dépendance vérifiée |
+| `GET /ready` | *readiness* — index, base et clé API ; **503** si l'une manque |
+| `POST /ask` | poser une question |
+| `GET /logs` | les 100 derniers appels |
+
+La documentation interactive complète est sur **`/docs`**, générée par FastAPI depuis
+les modèles Pydantic — les schémas ne sont donc écrits qu'une fois, dans le code.
+
+### Poser une question
+
+```bash
+curl -X POST http://localhost:8000/ask \
+  -H "Content-Type: application/json" \
+  -d '{"question": "Combien de points Nikola Jokić a-t-il marqués cette saison ?"}'
+```
+
+```json
+{
+  "reponse": {
+    "answer": "Nikola Jokić a marqué un total de 2 072 points cette saison.",
+    "citations": ["sql_1"],
+    "abstain": false,
+    "abstain_reason": null
+  },
+  "route": "base",
+  "route_motif": "La question demande un chiffre total de points marqués par un joueur sur une saison, ce que la base de données peut fournir.",
+  "requetes": [
+    {
+      "requete": "SELECT s.pts_total FROM stats s JOIN players p ON p.player_id = s.player_id WHERE p.full_name = 'Nikola Jokić'",
+      "colonnes": ["pts_total"],
+      "lignes": [[2072]],
+      "tronque": false
+    }
+  ],
+  "latence_ms": {"total": 1412.6}
+}
+```
+
+**`route` et `requetes` ne sont pas décoratifs.** Sans eux, l'appelant devrait croire le
+modèle sur parole ; avec eux, il peut rejouer la requête et vérifier le chiffre. La
+décomposition fine de la latence n'est pas dans la réponse : elle vit dans la trace
+Logfire, qui ouvre un span par étape.
+
+### Quand la réponse n'existe pas
+
+```bash
+curl -X POST http://localhost:8000/ask \
+  -H "Content-Type: application/json" \
+  -d '{"question": "Combien de points Reggie Miller a-t-il marqués cette saison ?"}'
+```
+
+```json
+{
+  "reponse": {
+    "answer": "Je n'ai pas pu trouver Reggie Miller dans la base de données des joueurs.",
+    "citations": [],
+    "abstain": true,
+    "abstain_reason": "Reggie Miller n'apparaît pas dans la base de données des joueurs pour la saison disponible."
+  },
+  "route": "base",
+  "requetes": [{"requete": "SELECT s.pts_total FROM stats s JOIN players p ...", "lignes": []}]
+}
+```
+
+**Une abstention est un succès : HTTP 200.** Le traitement est allé au bout et a conclu
+qu'il ne pouvait pas répondre. La compter comme une panne fausserait toute lecture des
+journaux. La requête à zéro ligne est ce qui **prouve** l'absence.
+
+### Vérifier que le service est prêt
+
+```bash
+curl http://localhost:8000/ready
+```
+
+```json
+{"status": "ready",
+ "verifications": {"index_vectoriel": true, "base_nba": true, "cle_mistral": true}}
+```
+
+Si l'une des trois manque, `/ready` rend **503** et nomme laquelle. C'est cet endpoint
+qu'un orchestrateur interroge avant de router du trafic ; `/health` ne dit que la vie du
+processus.
+
+### Codes de retour
+
+| Code | Sur `/ask` |
+|---|---|
+| `200` | traitement abouti — **y compris une abstention** |
+| `422` | question vide, trop courte ou de plus de 500 caractères — rejetée par Pydantic **avant** tout appel facturé |
+| `503` | index vectoriel indisponible |
+| `500` | panne pendant le traitement — journalisée avec son type d'exception |
+
+Sous PowerShell, `curl` est un alias d'`Invoke-WebRequest` : utiliser `curl.exe` ou Git
+Bash pour que les exemples ci-dessus fonctionnent tels quels.
+
+**`/logs` expose les questions et les réponses.** Fenêtre de débogage, volatile et
+propre au processus — à protéger avant toute mise en production.
 
 ---
 
@@ -397,7 +510,9 @@ définie. Couverture : `uv run pytest --cov --cov-report=html`.
 ## Structure
 
 ```
-app/chat.py                 interface Streamlit
+app/
+  chat.py                   interface Streamlit
+  api.py                    API REST FastAPI — mêmes réponses, autre transport
 scripts/
   index.py                  construction de l'index vectoriel
   load_excel_to_db.py       classeur → tables teams / players / stats

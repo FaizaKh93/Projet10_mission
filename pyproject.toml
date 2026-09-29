@@ -62,11 +62,13 @@ markers = [
 # pytest importe TOUS les modules de test à la collecte, y compris ceux qu'il désélectionne.
 
 # --- Couverture de code -------------------------------------------------------------
-# Mesurée sur src/, app/ et scripts/ : le code du système et ses pipelines. eval/ en est
-# exclu — c'est un harnais qu'on exécute, dont la boucle est répétée à blanc avant
-# chaque run plutôt que testée unitairement.
+# Mesurée sur tout le code du dépôt, sans exception : src/, app/, scripts/ et eval/.
+# eval/ y figure depuis que le harnais a des fonctions testables — construction du
+# contexte transmis au juge, notation, reprise après une panne du juge. Sa boucle
+# main() reste non couverte, car elle exige les deux API payantes : c'est ce qui
+# explique son taux, et c'est préférable à une exclusion qui flatterait la moyenne.
 [tool.coverage.run]
-source = ["src", "app", "scripts"]
+source = ["src", "app", "scripts", "eval"]
 omit = ["*/__pycache__/*", "*/tests/*"]
 
 [tool.coverage.report]
