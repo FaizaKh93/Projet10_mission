@@ -36,3 +36,9 @@ htmlcov/
 
 # Cache pytest
 .pytest_cache/
+
+# Site MkDocs généré, la copie du notebook que sa construction dépose dans docs/,
+# et le cache du plugin mkdocs-jupyter
+site/
+docs/notebook.ipynb
+.cache/
