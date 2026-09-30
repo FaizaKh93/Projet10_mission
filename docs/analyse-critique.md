@@ -29,6 +29,26 @@ Identiques au centième. Là où le mécanisme de récupération n'a pas changé
 n'ont pas bougé — exactement ce qu'on attend d'un contrôle. **Tout le gain global vient
 des six questions Excel**, et il est définitionnel.
 
+![Les quatre métriques par modalité, sur les quatre runs](assets/metriques-par-modalite-light.png#only-light)
+![Les quatre métriques par modalité, sur les quatre runs](assets/metriques-par-modalite-dark.png#only-dark)
+
+La ligne du bas porte les deux métriques concernées. La courbe **Reddit y est immobile au
+quatrième run**, pendant que celle d'Excel quitte le plancher zéro : la démonstration
+tient dans cet écart de comportement.
+
+Trois détails de lecture :
+
+- **Excel et hybride sont confondus à 0.000** en `context_precision` sur les trois
+  premiers runs. Ce n'est pas un trou dans les données : une question chiffrée y recevait
+  cinq extraits Reddit, jugés — à juste titre — totalement hors sujet.
+- La **montée** de la courbe Reddit au second run est réelle : le classeur sort de
+  l'index, les fils ne sont plus concurrencés.
+- Sa **redescente** au troisième ne l'est pas. Les contextes récupérés y sont
+  rigoureusement identiques à ceux du second run : cet écart de 0.084 sur six cas est
+  exactement le plancher de bruit du juge, 0.028 en moyenne globale
+  ([§ 2.3](methodologie.md)). C'est la taille du bruit, à comparer à l'œil avec le bond
+  d'Excel juste à côté.
+
 !!! danger "Ce qu'il faut en retenir"
     Ces deux métriques **ne se comparent pas** entre le troisième et le quatrième run.
     Présenter le passage de 0.165 à 0.554 comme une amélioration de la recherche serait

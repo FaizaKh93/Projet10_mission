@@ -63,17 +63,34 @@ def test_les_quatre_runs_sont_charges():
     assert all(len(cas) > 0 for cas in donnees.values())
 
 
-def test_quatre_figures_ecrites_deux_par_theme(sortie_temporaire):
-    """Deux figures × deux thèmes : une image à fond blanc sur une page sombre se lit
+def test_six_figures_ecrites_deux_par_theme(sortie_temporaire):
+    """Trois figures × deux thèmes : une image à fond blanc sur une page sombre se lit
     mal, et Material choisit la variante par le suffixe du lien."""
     fichiers = prep.generer_figures()
 
     noms = sorted(f.name for f in fichiers)
     assert noms == [
         "metriques-dark.png", "metriques-light.png",
+        "metriques-par-modalite-dark.png", "metriques-par-modalite-light.png",
         "modalites-dark.png", "modalites-light.png",
     ]
     assert all(f.exists() and f.stat().st_size > 0 for f in fichiers)
+
+
+def test_chaque_case_de_la_grille_a_des_donnees():
+    """La grille de contrôle croise 4 runs × 4 métriques × 3 modalités.
+
+    Une case vide ferait échouer `st.mean` à la construction de la figure — donc au
+    `mkdocs build`. Et un score hors de [0, 1] invaliderait l'axe commun, qui est ce
+    qui rend les quatre panneaux comparables.
+    """
+    donnees = prep.charger_runs()
+
+    for nom in prep.RUNS:
+        for metrique in (m for ligne in prep.GRILLE for m in ligne):
+            for modalite in prep.ORDRE_MOD:
+                score = prep.moyenne(donnees[nom], metrique, modalite)
+                assert 0 <= score <= 1, f"{nom}/{metrique}/{modalite} vaut {score}"
 
 
 # --- Le notebook ---------------------------------------------------------------------
@@ -107,7 +124,7 @@ def test_le_crochet_fait_les_deux(sortie_temporaire):
     prep.on_pre_build(config={})
 
     assert prep.NOTEBOOK_COPIE.exists()
-    assert len(list(prep.FIGURES.glob("*.png"))) == 4
+    assert len(list(prep.FIGURES.glob("*.png"))) == 6
 
 
 def test_matplotlib_absent_ne_fait_pas_echouer_la_construction(sortie_temporaire, monkeypatch, caplog):
