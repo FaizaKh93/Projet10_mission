@@ -21,6 +21,9 @@ env/
 .DS_Store
 Thumbs.db
 
+# Fichiers de verrou créés par Excel quand un classeur est ouvert
+~$*
+
 # Index vectoriel généré (régénérable via scripts/index.py)
 data/vector_db/
 

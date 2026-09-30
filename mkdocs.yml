@@ -55,7 +55,7 @@ markdown_extensions:
 # Le notebook vit dans eval/, à côté des résultats qu'il lit. Ce crochet le copie dans
 # docs/ à chaque construction plutôt que d'en maintenir un double.
 hooks:
-  - scripts/mkdocs_hooks.py
+  - scripts/preparer_docs.py
 
 plugins:
   - search:

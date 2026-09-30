@@ -11,9 +11,19 @@ flowchart LR
     CH -->|"mistral-embed<br/>par lots de 32"| VEC["vecteurs<br/>1 024 dimensions"]
     VEC -->|"normalisation L2"| IDX[("Index FAISS<br/>IndexFlatIP")]
 
-    CH -.->|"contrat Chunk"| G1{{"texte vide ?<br/>identifiant mal formé ?"}}
-    VEC -.->|"contrat LotEmbeddings"| G2{{"vecteur nul ?<br/>NaN ? dimension changée ?"}}
+    TXT -.-> C1{{"contrat SourceDocument<br/>extraction vide ou résiduelle ?"}}
+    CH -.-> C2{{"contrat Chunk<br/>texte vide ? identifiant mal formé ?"}}
+    VEC -.-> C3{{"contrat LotEmbeddings<br/>vecteur nul ? NaN ? dimension changée ?"}}
+
+    C1 -.->|"refusé"| ECARTE["document écarté,<br/>les autres continuent"]
+    C2 -.->|"refusé"| STOP["indexation interrompue"]
+    C3 -.->|"refusé"| STOP
 ```
+
+**Les trois contrats n'ont pas le même effet.** Un document illisible est **écarté** et les
+trois autres continuent. Un fragment ou un lot d'embeddings non conforme **arrête
+l'indexation** — parce que poursuivre produirait un index désaccordé, qui citerait le
+mauvais fragment sans qu'aucune erreur ne se déclenche jamais.
 
 ## Les choix, et leurs raisons
 

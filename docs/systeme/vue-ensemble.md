@@ -101,8 +101,27 @@ Des modèles Pydantic posés à chaque frontière. Sur le chemin documentaire :
 | Fragments récupérés | score hors de [-100, 100] |
 | **Réponse** | abstention sans motif |
 
-Le chemin chiffré a les siens : une ligne du classeur et un résultat de requête sont
-validés de la même manière, au même endroit.
+Le chemin chiffré a les siens, au même endroit :
+
+| Frontière | Ce qui est refusé |
+|---|---|
+| **Ligne du classeur** | colonne inattendue, valeur hors bornes — et surtout une **incohérence** : plus de tirs réussis que tentés, ou victoires + défaites ≠ matchs joués |
+| Franchise | code hors de 2 à 4 caractères, nom vide |
+| Document chargé en base | titre, source ou contenu trop courts — insérer « Page 1 » reviendrait à enregistrer un échec d'OCR comme source |
+| **Résultat de requête** | requête vide, et la troncature est **signalée** : sans ce drapeau, « les 50 premières lignes » se lirait comme « toutes » |
+
+!!! abstract "Un contrat qui applique des règles du jeu"
+    `LigneStats` ne vérifie pas que des types. Ses bornes sont **mesurées sur les 569
+    lignes réelles**, et son validateur refuse une ligne incohérente — plus de tirs
+    réussis que tentés, par exemple.
+
+    Deux invariants tentants ont été écartés parce qu'ils sont **faux** sur ces
+    données : `REB = OREB + DREB` échoue sur 206 lignes, et un `TS%` peut dépasser
+    100 % puisque c'est une mesure pondérée, pas une proportion. Un contrat qui les
+    aurait imposés aurait rejeté des lignes valides.
+
+`SQLResult` est le seul contrat de **sortie** de ce chemin — et c'est le même objet que
+l'API renvoie dans son champ `requetes`. Une définition, deux usages.
 
 **Les citations ne sont pas prises pour argent comptant.** Un validateur confronte en
 Python les identifiants cités au contexte réellement servi, et renvoie le modèle

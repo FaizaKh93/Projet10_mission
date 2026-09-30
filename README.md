@@ -163,8 +163,23 @@ le chemin documentaire :
 | Fragments récupérés | score hors de [-100, 100] |
 | **Réponse** | abstention sans motif |
 
-Le chemin chiffré a les siens : une ligne du classeur et un résultat de requête sont
-validés de la même manière, au même endroit.
+Le chemin chiffré a les siens, au même endroit :
+
+| Frontière | Ce qui est refusé |
+|---|---|
+| **Ligne du classeur** | colonne inattendue, valeur hors bornes — et surtout une **incohérence** : plus de tirs réussis que tentés, ou victoires + défaites ≠ matchs joués |
+| Franchise | code hors de 2 à 4 caractères, nom vide |
+| Document chargé en base | titre, source ou contenu trop courts — insérer « Page 1 » reviendrait à enregistrer un échec d'OCR comme source |
+| **Résultat de requête** | requête vide, et la troncature est **signalée** : sans ce drapeau, « les 50 premières lignes » se lirait comme « toutes » |
+
+Le contrat sur la ligne du classeur ne vérifie pas que des types : il applique des
+**règles du jeu**. Les bornes sont mesurées sur les 569 lignes réelles — et deux
+invariants tentants ont été écartés parce qu'ils sont faux sur ces données :
+`REB = OREB + DREB` échoue sur 206 lignes, et un `TS%` peut dépasser 100 % puisque
+c'est une mesure pondérée, pas une proportion.
+
+Le dernier, `SQLResult`, est le seul contrat de **sortie** de ce chemin — et c'est le
+même objet que l'API renvoie dans son champ `requetes`. Une définition, deux usages.
 
 **Les citations ne sont pas prises pour argent comptant.** Un validateur confronte en
 Python les identifiants cités au contexte réellement servi, et renvoie le modèle
@@ -199,9 +214,19 @@ flowchart LR
     CH -->|"mistral-embed<br/>par lots de 32"| VEC["vecteurs<br/>1 024 dimensions"]
     VEC -->|"normalisation L2"| IDX[("Index FAISS<br/>IndexFlatIP")]
 
-    CH -.->|"contrat Chunk"| G1{{"texte vide ?<br/>identifiant mal formé ?"}}
-    VEC -.->|"contrat LotEmbeddings"| G2{{"vecteur nul ?<br/>NaN ? dimension changée ?"}}
+    TXT -.-> C1{{"contrat SourceDocument<br/>extraction vide ou résiduelle ?"}}
+    CH -.-> C2{{"contrat Chunk<br/>texte vide ? identifiant mal formé ?"}}
+    VEC -.-> C3{{"contrat LotEmbeddings<br/>vecteur nul ? NaN ? dimension changée ?"}}
+
+    C1 -.->|"refusé"| ECARTE["document écarté,<br/>les autres continuent"]
+    C2 -.->|"refusé"| STOP["indexation interrompue"]
+    C3 -.->|"refusé"| STOP
 ```
+
+**Les trois contrats n'ont pas le même effet.** Un document illisible est écarté et les
+autres continuent ; un fragment ou un lot d'embeddings non conforme **arrête
+l'indexation**, parce que poursuivre produirait un index désaccordé qui citerait le
+mauvais fragment sans qu'aucune erreur ne se déclenche.
 
 Les vecteurs sont normalisés avant insertion : leur produit scalaire *est* alors la
 similarité cosinus, celle qui a du sens pour du texte.
