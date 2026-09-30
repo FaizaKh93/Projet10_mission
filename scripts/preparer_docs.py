@@ -32,6 +32,19 @@ METRIQUES = ["faithfulness", "context_precision", "context_recall", "answer_corr
 ORDRE_MOD = ["pdf_reddit", "excel", "hybride"]
 ETIQUETTES_MOD = {"pdf_reddit": "Reddit", "excel": "Excel", "hybride": "hybride"}
 
+# La grille de contrôle : une LIGNE par nature de jugement. Celle du bas porte les deux
+# métriques qui ne se comparent pas au quatrième run — leur unité a changé. La
+# disposition dit donc l'avertissement, au lieu de compter sur une légende.
+GRILLE = [
+    ("faithfulness", "answer_correctness"),    # ce qui juge la réponse
+    ("context_precision", "context_recall"),   # ce qui juge la récupération
+]
+INTITULE_LIGNES = "en haut ce qui juge la réponse, en bas ce qui juge la récupération"
+
+# Un marqueur par modalité : l'identité ne repose jamais sur la seule couleur — ni pour
+# un daltonien, ni sur une impression en noir et blanc.
+MARQUEURS_MOD = {"pdf_reddit": "o", "excel": "s", "hybride": "^"}
+
 # Les runs sont une PROGRESSION : une seule teinte, du clair au foncé. Les modalités
 # sont des identités distinctes : des teintes séparées. Palette reprise du notebook
 # déjà publié, pour que figures du rapport et de l'annexe se lisent comme un seul jeu.
@@ -170,8 +183,64 @@ def figure_par_modalite(donnees: dict, theme_nom: str) -> Path:
     return chemin
 
 
+def figure_par_metrique(donnees: dict, theme_nom: str) -> Path:
+    """Les quatre métriques, chacune découpée par modalité : la grille de contrôle.
+
+    C'est la figure du § 6.1. Sur la ligne du bas, la courbe **Reddit reste plate** —
+    le mécanisme de récupération n'y a pas changé — là où Excel décolle du plancher
+    zéro. Le bond global des deux métriques de contexte vient donc d'un changement
+    d'unité, et non d'une meilleure recherche. Le tableau du rapport le démontre ; la
+    figure le rend visible en une seconde.
+
+    Axe y commun à [0, 1] sur les quatre panneaux : une échelle ajustée par panneau
+    ferait paraître un mouvement de 0.05 aussi ample qu'un mouvement de 0.5, ce qui
+    ruinerait exactement la comparaison que cette figure existe pour permettre.
+    """
+    import matplotlib.pyplot as plt
+
+    theme = THEMES[theme_nom]
+    fig, axes = plt.subplots(
+        2, 2, figsize=(9.5, 6.6), facecolor=theme["fond"], sharex=True, sharey=True
+    )
+
+    x = range(len(RUNS))
+    for ligne, metriques in enumerate(GRILLE):
+        for colonne, metrique in enumerate(metriques):
+            ax = axes[ligne][colonne]
+            for modalite, couleur in zip(ORDRE_MOD, TEINTES_MOD):
+                valeurs = [moyenne(donnees[nom], metrique, modalite) for nom in RUNS]
+                ax.plot(x, valeurs, marker=MARQUEURS_MOD[modalite], markersize=6,
+                        linewidth=1.8, color=couleur, label=ETIQUETTES_MOD[modalite])
+            ax.set_ylim(0, 1)
+            # Le ylabel seulement à gauche : répété quatre fois il n'informe plus.
+            _habiller(ax, theme, metrique, "score moyen" if colonne == 0 else "")
+
+    # Les noms de runs ne tiennent qu'inclinés : `pydantic_contracts` en fait dix-huit
+    # caractères pour un panneau de demi-largeur.
+    for ax in axes[1]:
+        ax.set_xticks(list(x))
+        ax.set_xticklabels(RUNS, fontsize=7.5, rotation=22, ha="right")
+
+    fig.suptitle(
+        f"Les quatre métriques par modalité — {INTITULE_LIGNES}",
+        x=0.012, ha="left", fontsize=10.5, color=theme["encre"],
+    )
+    # Une seule légende pour les quatre panneaux : les trois mêmes séries partout.
+    poignees, etiquettes = axes[0][0].get_legend_handles_labels()
+    legende = fig.legend(poignees, etiquettes, ncol=3, frameon=False, fontsize=9,
+                         loc="upper left", bbox_to_anchor=(0.01, 0.955))
+    for texte in legende.get_texts():
+        texte.set_color(theme["encre_faible"])
+
+    chemin = FIGURES / f"metriques-par-modalite-{theme_nom}.png"
+    fig.tight_layout(rect=(0, 0, 1, 0.91))  # laisse la bande du titre et de la légende
+    fig.savefig(chemin, dpi=160, facecolor=theme["fond"])
+    plt.close(fig)
+    return chemin
+
+
 def generer_figures() -> list[Path]:
-    """Les quatre fichiers : deux figures × deux thèmes.
+    """Les six fichiers : trois figures × deux thèmes.
 
     Deux variantes parce que le site bascule de thème, et qu'une image à fond blanc sur
     une page sombre se lit mal. Material les choisit par le suffixe `#only-light`.
@@ -185,7 +254,7 @@ def generer_figures() -> list[Path]:
     return [
         figure(donnees, theme_nom)
         for theme_nom in THEMES
-        for figure in (figure_metriques, figure_par_modalite)
+        for figure in (figure_metriques, figure_par_modalite, figure_par_metrique)
     ]
 
 
